@@ -472,6 +472,20 @@ impl CdpBackend {
         Ok(())
     }
 
+    fn drain_target_collector(&mut self, target_id: &str) -> BrowserResult<()> {
+        let result = {
+            let collector = self
+                .collectors
+                .get_mut(target_id)
+                .expect("collector exists");
+            drain_event_collector(collector)
+        };
+        if result.is_err() {
+            self.collectors.remove(target_id);
+        }
+        result
+    }
+
     fn page_list_until(&self, deadline: Instant) -> BrowserResult<Vec<BackendPage>> {
         let list = self.page_descriptors_until(deadline)?;
         let mut pages = Vec::new();
@@ -794,11 +808,11 @@ impl BrowserBackend for CdpBackend {
         target_id: &str,
     ) -> BrowserResult<BackendEventSnapshot<BackendConsoleEntry>> {
         self.ensure_event_collector(target_id)?;
+        self.drain_target_collector(target_id)?;
         let collector = self
             .collectors
-            .get_mut(target_id)
-            .expect("collector exists");
-        drain_event_collector(collector)?;
+            .get(target_id)
+            .expect("collector survives successful drain");
         Ok(BackendEventSnapshot {
             entries: collector.events.console.iter().cloned().collect(),
             truncated: collector.events.console_truncated,
@@ -810,11 +824,11 @@ impl BrowserBackend for CdpBackend {
         target_id: &str,
     ) -> BrowserResult<BackendEventSnapshot<BackendNetworkEntry>> {
         self.ensure_event_collector(target_id)?;
+        self.drain_target_collector(target_id)?;
         let collector = self
             .collectors
-            .get_mut(target_id)
-            .expect("collector exists");
-        drain_event_collector(collector)?;
+            .get(target_id)
+            .expect("collector survives successful drain");
         let mut values = collector
             .events
             .network
@@ -1106,15 +1120,19 @@ impl BrowserBackend for CdpBackend {
     }
 
     fn close_page(&mut self, target_id: &str) -> BrowserResult<()> {
-        self.collectors.remove(target_id);
         let deadline = Instant::now() + REQUEST_TIMEOUT;
-        self.browser_call_until(
-            "Target.closeTarget",
-            json!({ "targetId": target_id }),
-            true,
-            deadline,
-        )
-        .map(|_| ())
+        let result = self
+            .browser_call_until(
+                "Target.closeTarget",
+                json!({ "targetId": target_id }),
+                true,
+                deadline,
+            )
+            .map(|_| ());
+        if result.is_ok() {
+            self.collectors.remove(target_id);
+        }
+        result
     }
 
     fn shutdown(&mut self, timeout: Duration) -> BrowserResult<()> {
@@ -1434,7 +1452,13 @@ fn drain_event_collector(collector: &mut CdpEventCollector) -> BrowserResult<()>
                 };
                 record_cdp_event(&mut collector.events, &value);
             }
-            Ok(Message::Close(_)) => break,
+            Ok(Message::Close(_)) => {
+                return Err(BrowserError::observed(
+                    "cdp_receive_closed",
+                    "diagnostic CDP stream closed before observation completed",
+                    Some("pages"),
+                ))
+            }
             Ok(_) => {}
             Err(tungstenite::Error::Io(error))
                 if matches!(
@@ -2066,6 +2090,43 @@ Connection: close
         .expect("fake CDP observation");
         assert_eq!(result["frameTree"]["frame"]["loaderId"], "doc");
         assert_eq!(next_id, 2);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn closed_diagnostic_stream_is_not_reported_as_success() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut websocket = accept(stream).unwrap();
+            websocket.close(None).unwrap();
+        });
+        let endpoint = Url::parse(&format!(
+            "ws://127.0.0.1:{}/devtools/page/closed-diagnostics",
+            address.port()
+        ))
+        .unwrap();
+        let websocket =
+            open_loopback_websocket(&endpoint, Instant::now() + Duration::from_secs(1)).unwrap();
+        let mut collector = CdpEventCollector {
+            websocket,
+            events: CdpEventBuffer::default(),
+        };
+        collector.events.push_console(BackendConsoleEntry {
+            level: "error".into(),
+            text: "stale-buffer".into(),
+            source: None,
+            timestamp: None,
+        });
+        let error = drain_event_collector(&mut collector).unwrap_err();
+        assert_eq!(error.kind, "cdp_receive_closed");
+        assert_eq!(
+            error.execution_state,
+            crate::types::ExecutionState::Completed
+        );
+        assert_eq!(error.recovery_action, Some("pages"));
+        assert_eq!(collector.events.console.len(), 1);
         handle.join().unwrap();
     }
 
