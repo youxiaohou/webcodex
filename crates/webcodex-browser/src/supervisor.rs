@@ -18,6 +18,14 @@ use std::time::Duration;
 use std::time::Instant;
 use uuid::Uuid;
 
+// Keep non-image Browser observations below the Server's ordinary 256 KiB
+// Runner-result retention boundary, with explicit room for the Runner envelope.
+const MAX_BROWSER_OBSERVATION_RESULT_BYTES: usize = 192 * 1024;
+const BROWSER_OBSERVATION_ENVELOPE_RESERVE_BYTES: usize = 8 * 1024;
+const BROWSER_OBSERVATION_ENTRIES_BYTES: usize =
+    MAX_BROWSER_OBSERVATION_RESULT_BYTES - BROWSER_OBSERVATION_ENVELOPE_RESERVE_BYTES;
+const DIAGNOSTIC_SECTION_ENTRIES_BYTES: usize = BROWSER_OBSERVATION_ENTRIES_BYTES / 2;
+
 #[derive(Clone)]
 pub struct BrowserSupervisor {
     inner: Arc<Mutex<SupervisorState>>,
@@ -304,12 +312,23 @@ impl BrowserSupervisor {
             .get_mut(browser_id)
             .ok_or_else(|| stale_browser(browser_id))?;
         let target_id = runtime.page_target(page_id)?;
-        let entries = runtime.backend.console(&target_id)?;
-        Ok(
-            serde_json::json!({"count": entries.len(), "entries": entries.into_iter().map(|entry| serde_json::json!({
-            "level": entry.level, "text": entry.text, "source": entry.source, "timestamp": entry.timestamp
-        })).collect::<Vec<_>>() }),
-        )
+        let snapshot = runtime.backend.console(&target_id)?;
+        let retained_count = snapshot.entries.len();
+        let entries = snapshot
+            .entries
+            .into_iter()
+            .map(|entry| serde_json::json!({
+                "level": entry.level, "text": entry.text, "source": entry.source, "timestamp": entry.timestamp
+            }))
+            .collect::<Vec<_>>();
+        let (entries, projection_truncated) =
+            bounded_recent_json_entries(entries, BROWSER_OBSERVATION_ENTRIES_BYTES);
+        Ok(serde_json::json!({
+            "retained_count": retained_count,
+            "count": entries.len(),
+            "truncated": snapshot.truncated || projection_truncated,
+            "entries": entries,
+        }))
     }
 
     pub fn network(&self, browser_id: &str, page_id: &str) -> BrowserResult<serde_json::Value> {
@@ -320,13 +339,24 @@ impl BrowserSupervisor {
             .get_mut(browser_id)
             .ok_or_else(|| stale_browser(browser_id))?;
         let target_id = runtime.page_target(page_id)?;
-        let entries = runtime.backend.network(&target_id)?;
-        Ok(
-            serde_json::json!({"count": entries.len(), "entries": entries.into_iter().map(|entry| serde_json::json!({
-            "method": entry.method, "url": entry.url, "resource_type": entry.resource_type,
-            "status": entry.status, "failed_reason": entry.failed_reason, "timestamp": entry.timestamp
-        })).collect::<Vec<_>>() }),
-        )
+        let snapshot = runtime.backend.network(&target_id)?;
+        let retained_count = snapshot.entries.len();
+        let entries = snapshot
+            .entries
+            .into_iter()
+            .map(|entry| serde_json::json!({
+                "method": entry.method, "url": entry.url, "resource_type": entry.resource_type,
+                "status": entry.status, "failed_reason": entry.failed_reason, "timestamp": entry.timestamp
+            }))
+            .collect::<Vec<_>>();
+        let (entries, projection_truncated) =
+            bounded_recent_json_entries(entries, BROWSER_OBSERVATION_ENTRIES_BYTES);
+        Ok(serde_json::json!({
+            "retained_count": retained_count,
+            "count": entries.len(),
+            "truncated": snapshot.truncated || projection_truncated,
+            "entries": entries,
+        }))
     }
 
     pub fn diagnostics(
@@ -343,11 +373,12 @@ impl BrowserSupervisor {
             .get_mut(browser_id)
             .ok_or_else(|| stale_browser(browser_id))?;
         let target_id = runtime.page_target(page_id)?;
-        let console = runtime.backend.console(&target_id)?;
-        let network = runtime.backend.network(&target_id)?;
-        let console_total = console.len();
-        let network_total = network.len();
-        let console = console
+        let console_snapshot = runtime.backend.console(&target_id)?;
+        let network_snapshot = runtime.backend.network(&target_id)?;
+        let console_retained = console_snapshot.entries.len();
+        let network_retained = network_snapshot.entries.len();
+        let console = console_snapshot
+            .entries
             .into_iter()
             .filter(|entry| {
                 include_all_console
@@ -356,8 +387,12 @@ impl BrowserSupervisor {
                         "error" | "warning" | "warn" | "exception"
                     )
             })
+            .map(|entry| serde_json::json!({
+                "level": entry.level, "text": entry.text, "source": entry.source, "timestamp": entry.timestamp
+            }))
             .collect::<Vec<_>>();
-        let network = network
+        let network = network_snapshot
+            .entries
             .into_iter()
             .filter(|entry| {
                 include_all_network
@@ -365,19 +400,24 @@ impl BrowserSupervisor {
                     || entry.status.is_some_and(|status| status >= 400)
                     || matches!(entry.resource_type.as_deref(), Some("XHR") | Some("Fetch"))
             })
-            .collect::<Vec<_>>();
-        Ok(serde_json::json!({
-            "console_total": console_total,
-            "console_count": console.len(),
-            "console": console.into_iter().map(|entry| serde_json::json!({
-                "level": entry.level, "text": entry.text, "source": entry.source, "timestamp": entry.timestamp
-            })).collect::<Vec<_>>(),
-            "network_total": network_total,
-            "network_count": network.len(),
-            "network": network.into_iter().map(|entry| serde_json::json!({
+            .map(|entry| serde_json::json!({
                 "method": entry.method, "url": entry.url, "resource_type": entry.resource_type,
                 "status": entry.status, "failed_reason": entry.failed_reason, "timestamp": entry.timestamp
-            })).collect::<Vec<_>>()
+            }))
+            .collect::<Vec<_>>();
+        let (console, console_truncated) =
+            bounded_recent_json_entries(console, DIAGNOSTIC_SECTION_ENTRIES_BYTES);
+        let (network, network_truncated) =
+            bounded_recent_json_entries(network, DIAGNOSTIC_SECTION_ENTRIES_BYTES);
+        Ok(serde_json::json!({
+            "console_retained": console_retained,
+            "console_count": console.len(),
+            "console_truncated": console_snapshot.truncated || console_truncated,
+            "console": console,
+            "network_retained": network_retained,
+            "network_count": network.len(),
+            "network_truncated": network_snapshot.truncated || network_truncated,
+            "network": network,
         }))
     }
 
@@ -878,6 +918,30 @@ fn screenshot_result(
     })
 }
 
+fn bounded_recent_json_entries(
+    entries: Vec<serde_json::Value>,
+    max_serialized_bytes: usize,
+) -> (Vec<serde_json::Value>, bool) {
+    let total = entries.len();
+    let mut kept = Vec::new();
+    // Exact JSON-array accounting: brackets plus one comma between entries.
+    let mut used = 2usize;
+    for entry in entries.into_iter().rev() {
+        let entry_bytes = serde_json::to_vec(&entry)
+            .map(|encoded| encoded.len())
+            .unwrap_or(max_serialized_bytes.saturating_add(1));
+        let separator = usize::from(!kept.is_empty());
+        if used.saturating_add(separator).saturating_add(entry_bytes) > max_serialized_bytes {
+            break;
+        }
+        used = used.saturating_add(separator).saturating_add(entry_bytes);
+        kept.push(entry);
+    }
+    kept.reverse();
+    let truncated = kept.len() < total;
+    (kept, truncated)
+}
+
 fn pre_effect_revalidation_error(mut error: BrowserError) -> BrowserError {
     error.execution_state = crate::types::ExecutionState::NotStarted;
     if error.recovery_action.is_none() {
@@ -917,7 +981,8 @@ fn opaque_id(prefix: &str) -> String {
 mod tests {
     use super::*;
     use crate::cdp::{
-        BackendConsoleEntry, BackendFactory, BackendNetworkEntry, BackendSnapshot, BrowserBackend,
+        BackendConsoleEntry, BackendEventSnapshot, BackendFactory, BackendNetworkEntry,
+        BackendSnapshot, BrowserBackend,
     };
     use crate::types::ExecutionState;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1027,11 +1092,23 @@ mod tests {
                 height: 600,
             })
         }
-        fn console(&mut self, _target_id: &str) -> BrowserResult<Vec<BackendConsoleEntry>> {
-            Ok(Vec::new())
+        fn console(
+            &mut self,
+            _target_id: &str,
+        ) -> BrowserResult<BackendEventSnapshot<BackendConsoleEntry>> {
+            Ok(BackendEventSnapshot {
+                entries: Vec::new(),
+                truncated: false,
+            })
         }
-        fn network(&mut self, _target_id: &str) -> BrowserResult<Vec<BackendNetworkEntry>> {
-            Ok(Vec::new())
+        fn network(
+            &mut self,
+            _target_id: &str,
+        ) -> BrowserResult<BackendEventSnapshot<BackendNetworkEntry>> {
+            Ok(BackendEventSnapshot {
+                entries: Vec::new(),
+                truncated: false,
+            })
         }
         fn clear_diagnostics(&mut self, _target_id: &str) -> BrowserResult<()> {
             Ok(())
@@ -1406,6 +1483,40 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.kind, "invalid_image_dimensions");
         assert_eq!(error.execution_state, ExecutionState::Completed);
+    }
+
+    #[test]
+    fn diagnostic_projection_is_serialized_bounded_and_keeps_newest_entries() {
+        let entries = (0..200)
+            .map(|index| {
+                serde_json::json!({
+                    "index": index,
+                    "text": format!("{index}-{}", "\"".repeat(2048)),
+                })
+            })
+            .collect::<Vec<_>>();
+        let (console, console_truncated) =
+            bounded_recent_json_entries(entries.clone(), DIAGNOSTIC_SECTION_ENTRIES_BYTES);
+        let (network, network_truncated) =
+            bounded_recent_json_entries(entries, DIAGNOSTIC_SECTION_ENTRIES_BYTES);
+        assert!(console_truncated);
+        assert!(network_truncated);
+        assert_eq!(console.last().unwrap()["index"], 199);
+        assert_eq!(network.last().unwrap()["index"], 199);
+        let output = serde_json::json!({
+            "console_retained": 200,
+            "console_count": console.len(),
+            "console_truncated": console_truncated,
+            "console": console,
+            "network_retained": 200,
+            "network_count": network.len(),
+            "network_truncated": network_truncated,
+            "network": network,
+        });
+        assert!(
+            serde_json::to_vec(&output).unwrap().len() <= MAX_BROWSER_OBSERVATION_RESULT_BYTES,
+            "diagnostics result exceeded the ordinary Runner retention-safe budget"
+        );
     }
 
     #[test]

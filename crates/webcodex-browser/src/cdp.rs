@@ -3,7 +3,7 @@ use crate::types::{
     MAX_PAGES_PER_BROWSER, MAX_SNAPSHOT_BYTES, MAX_SNAPSHOT_NODES, REQUEST_TIMEOUT,
 };
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::Read;
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
@@ -27,8 +27,14 @@ pub(crate) trait BrowserBackend: Send {
     fn new_page(&mut self) -> BrowserResult<String>;
     fn snapshot(&mut self, target_id: &str) -> BrowserResult<BackendSnapshot>;
     fn screenshot(&mut self, target_id: &str) -> BrowserResult<BackendScreenshot>;
-    fn console(&mut self, target_id: &str) -> BrowserResult<Vec<BackendConsoleEntry>>;
-    fn network(&mut self, target_id: &str) -> BrowserResult<Vec<BackendNetworkEntry>>;
+    fn console(
+        &mut self,
+        target_id: &str,
+    ) -> BrowserResult<BackendEventSnapshot<BackendConsoleEntry>>;
+    fn network(
+        &mut self,
+        target_id: &str,
+    ) -> BrowserResult<BackendEventSnapshot<BackendNetworkEntry>>;
     fn clear_diagnostics(&mut self, target_id: &str) -> BrowserResult<()>;
     fn navigate(&mut self, target_id: &str, url: &str) -> BrowserResult<()>;
     fn reload(&mut self, target_id: &str) -> BrowserResult<()>;
@@ -120,10 +126,56 @@ pub(crate) struct BackendNetworkEntry {
     pub(crate) timestamp: Option<f64>,
 }
 
+#[derive(Debug)]
+pub(crate) struct BackendEventSnapshot<T> {
+    pub(crate) entries: Vec<T>,
+    pub(crate) truncated: bool,
+}
+
+#[derive(Default)]
+struct CdpEventBuffer {
+    console: VecDeque<BackendConsoleEntry>,
+    console_truncated: bool,
+    network: HashMap<String, BackendNetworkEntry>,
+    network_order: VecDeque<String>,
+    network_truncated: bool,
+}
+
+impl CdpEventBuffer {
+    fn push_console(&mut self, entry: BackendConsoleEntry) {
+        if self.console.len() >= crate::types::MAX_CONSOLE_ENTRIES {
+            self.console.pop_front();
+            self.console_truncated = true;
+        }
+        self.console.push_back(entry);
+    }
+
+    fn insert_network(&mut self, request_id: String, entry: BackendNetworkEntry) {
+        if self.network.contains_key(&request_id) {
+            self.network_order
+                .retain(|existing| existing != &request_id);
+        } else if self.network.len() >= crate::types::MAX_NETWORK_ENTRIES {
+            if let Some(oldest) = self.network_order.pop_front() {
+                self.network.remove(&oldest);
+                self.network_truncated = true;
+            }
+        }
+        self.network.insert(request_id.clone(), entry);
+        self.network_order.push_back(request_id);
+    }
+
+    fn clear(&mut self) {
+        self.console.clear();
+        self.console_truncated = false;
+        self.network.clear();
+        self.network_order.clear();
+        self.network_truncated = false;
+    }
+}
+
 struct CdpEventCollector {
     websocket: WebSocket<TcpStream>,
-    console: Vec<BackendConsoleEntry>,
-    network: HashMap<String, BackendNetworkEntry>,
+    events: CdpEventBuffer,
 }
 
 pub(crate) struct ChromiumFactory;
@@ -414,8 +466,7 @@ impl CdpBackend {
             target_id.to_string(),
             CdpEventCollector {
                 websocket,
-                console: Vec::new(),
-                network: HashMap::new(),
+                events: CdpEventBuffer::default(),
             },
         );
         Ok(())
@@ -738,42 +789,57 @@ impl BrowserBackend for CdpBackend {
         })
     }
 
-    fn console(&mut self, target_id: &str) -> BrowserResult<Vec<BackendConsoleEntry>> {
+    fn console(
+        &mut self,
+        target_id: &str,
+    ) -> BrowserResult<BackendEventSnapshot<BackendConsoleEntry>> {
         self.ensure_event_collector(target_id)?;
         let collector = self
             .collectors
             .get_mut(target_id)
             .expect("collector exists");
         drain_event_collector(collector)?;
-        Ok(collector.console.clone())
+        Ok(BackendEventSnapshot {
+            entries: collector.events.console.iter().cloned().collect(),
+            truncated: collector.events.console_truncated,
+        })
     }
 
-    fn network(&mut self, target_id: &str) -> BrowserResult<Vec<BackendNetworkEntry>> {
+    fn network(
+        &mut self,
+        target_id: &str,
+    ) -> BrowserResult<BackendEventSnapshot<BackendNetworkEntry>> {
         self.ensure_event_collector(target_id)?;
         let collector = self
             .collectors
             .get_mut(target_id)
             .expect("collector exists");
         drain_event_collector(collector)?;
-        let mut values = collector.network.values().cloned().collect::<Vec<_>>();
+        let mut values = collector
+            .events
+            .network
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
         values.sort_by(|a, b| {
             a.timestamp
                 .partial_cmp(&b.timestamp)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        Ok(values)
+        Ok(BackendEventSnapshot {
+            entries: values,
+            truncated: collector.events.network_truncated,
+        })
     }
 
     fn clear_diagnostics(&mut self, target_id: &str) -> BrowserResult<()> {
         self.ensure_event_collector(target_id)?;
+        let next_id = &mut self.next_id;
         let collector = self
             .collectors
             .get_mut(target_id)
             .expect("collector exists");
-        drain_event_collector(collector)?;
-        collector.console.clear();
-        collector.network.clear();
-        Ok(())
+        clear_event_collector(collector, next_id)
     }
 
     fn navigate(&mut self, target_id: &str, url: &str) -> BrowserResult<()> {
@@ -1332,6 +1398,27 @@ fn cdp_call(
     )
 }
 
+fn clear_event_collector(
+    collector: &mut CdpEventCollector,
+    next_id: &mut u64,
+) -> BrowserResult<()> {
+    // A response on the same ordered CDP websocket is a bounded barrier: all
+    // already-queued diagnostic messages are consumed before this response.
+    // Clearing only after the barrier prevents pre-clear backlog from resurfacing
+    // on the next observation without relying on a best-effort drain duration.
+    cdp_call_on_websocket_until(
+        &mut collector.websocket,
+        next_id,
+        "Page.getFrameTree",
+        json!({}),
+        false,
+        Instant::now() + REQUEST_TIMEOUT,
+    )
+    .map_err(pre_dispatch_error)?;
+    collector.events.clear();
+    Ok(())
+}
+
 fn drain_event_collector(collector: &mut CdpEventCollector) -> BrowserResult<()> {
     let deadline = Instant::now() + Duration::from_millis(150);
     loop {
@@ -1345,12 +1432,7 @@ fn drain_event_collector(collector: &mut CdpEventCollector) -> BrowserResult<()>
                 let Ok(value) = serde_json::from_str::<Value>(&text) else {
                     continue;
                 };
-                record_cdp_event(collector, &value);
-                if collector.console.len() >= crate::types::MAX_CONSOLE_ENTRIES
-                    && collector.network.len() >= crate::types::MAX_NETWORK_ENTRIES
-                {
-                    break;
-                }
+                record_cdp_event(&mut collector.events, &value);
             }
             Ok(Message::Close(_)) => break,
             Ok(_) => {}
@@ -1374,13 +1456,11 @@ fn drain_event_collector(collector: &mut CdpEventCollector) -> BrowserResult<()>
     Ok(())
 }
 
-fn record_cdp_event(collector: &mut CdpEventCollector, value: &Value) {
+fn record_cdp_event(buffer: &mut CdpEventBuffer, value: &Value) {
     let method = value.get("method").and_then(Value::as_str);
     let params = value.get("params").cloned().unwrap_or_default();
     match method {
-        Some("Runtime.consoleAPICalled")
-            if collector.console.len() < crate::types::MAX_CONSOLE_ENTRIES =>
-        {
+        Some("Runtime.consoleAPICalled") => {
             let level = params.get("type").and_then(Value::as_str).unwrap_or("log");
             let text = params
                 .get("args")
@@ -1392,18 +1472,16 @@ fn record_cdp_event(collector: &mut CdpEventCollector, value: &Value) {
                         .join(" ")
                 })
                 .unwrap_or_default();
-            collector.console.push(BackendConsoleEntry {
-                level: level.to_string(),
+            buffer.push_console(BackendConsoleEntry {
+                level: clip_bytes(level, 64),
                 text: clip_bytes(&text, crate::types::MAX_DIAGNOSTIC_TEXT_BYTES),
                 source: None,
                 timestamp: params.get("timestamp").and_then(Value::as_f64),
             });
         }
-        Some("Runtime.exceptionThrown")
-            if collector.console.len() < crate::types::MAX_CONSOLE_ENTRIES =>
-        {
+        Some("Runtime.exceptionThrown") => {
             let details = params.get("exceptionDetails").cloned().unwrap_or_default();
-            collector.console.push(BackendConsoleEntry {
+            buffer.push_console(BackendConsoleEntry {
                 level: "exception".to_string(),
                 text: clip_bytes(
                     details
@@ -1415,18 +1493,17 @@ fn record_cdp_event(collector: &mut CdpEventCollector, value: &Value) {
                 source: details
                     .get("url")
                     .and_then(Value::as_str)
-                    .map(str::to_string),
+                    .map(|url| clip_bytes(url, crate::types::MAX_URL_BYTES)),
                 timestamp: params.get("timestamp").and_then(Value::as_f64),
             });
         }
-        Some("Log.entryAdded") if collector.console.len() < crate::types::MAX_CONSOLE_ENTRIES => {
+        Some("Log.entryAdded") => {
             let entry = value.pointer("/params/entry").cloned().unwrap_or_default();
-            collector.console.push(BackendConsoleEntry {
-                level: entry
-                    .get("level")
-                    .and_then(Value::as_str)
-                    .unwrap_or("info")
-                    .to_string(),
+            buffer.push_console(BackendConsoleEntry {
+                level: clip_bytes(
+                    entry.get("level").and_then(Value::as_str).unwrap_or("info"),
+                    64,
+                ),
                 text: clip_bytes(
                     entry
                         .get("text")
@@ -1434,25 +1511,28 @@ fn record_cdp_event(collector: &mut CdpEventCollector, value: &Value) {
                         .unwrap_or_default(),
                     crate::types::MAX_DIAGNOSTIC_TEXT_BYTES,
                 ),
-                source: entry.get("url").and_then(Value::as_str).map(str::to_string),
+                source: entry
+                    .get("url")
+                    .and_then(Value::as_str)
+                    .map(|url| clip_bytes(url, crate::types::MAX_URL_BYTES)),
                 timestamp: entry.get("timestamp").and_then(Value::as_f64),
             });
         }
-        Some("Network.requestWillBeSent")
-            if collector.network.len() < crate::types::MAX_NETWORK_ENTRIES =>
-        {
+        Some("Network.requestWillBeSent") => {
             let Some(request_id) = params.get("requestId").and_then(Value::as_str) else {
                 return;
             };
             let request = params.get("request").cloned().unwrap_or_default();
-            collector.network.insert(
+            buffer.insert_network(
                 request_id.to_string(),
                 BackendNetworkEntry {
-                    method: request
-                        .get("method")
-                        .and_then(Value::as_str)
-                        .unwrap_or("GET")
-                        .to_string(),
+                    method: clip_bytes(
+                        request
+                            .get("method")
+                            .and_then(Value::as_str)
+                            .unwrap_or("GET"),
+                        128,
+                    ),
                     url: clip_bytes(
                         request
                             .get("url")
@@ -1463,7 +1543,7 @@ fn record_cdp_event(collector: &mut CdpEventCollector, value: &Value) {
                     resource_type: params
                         .get("type")
                         .and_then(Value::as_str)
-                        .map(str::to_string),
+                        .map(|resource_type| clip_bytes(resource_type, 64)),
                     status: None,
                     failed_reason: None,
                     timestamp: params.get("timestamp").and_then(Value::as_f64),
@@ -1475,7 +1555,7 @@ fn record_cdp_event(collector: &mut CdpEventCollector, value: &Value) {
                 return;
             };
             let response = params.get("response").cloned().unwrap_or_default();
-            if let Some(entry) = collector.network.get_mut(request_id) {
+            if let Some(entry) = buffer.network.get_mut(request_id) {
                 entry.status = response
                     .get("status")
                     .and_then(Value::as_f64)
@@ -1486,7 +1566,7 @@ fn record_cdp_event(collector: &mut CdpEventCollector, value: &Value) {
             let Some(request_id) = params.get("requestId").and_then(Value::as_str) else {
                 return;
             };
-            if let Some(entry) = collector.network.get_mut(request_id) {
+            if let Some(entry) = buffer.network.get_mut(request_id) {
                 entry.failed_reason = params
                     .get("errorText")
                     .and_then(Value::as_str)
@@ -1987,6 +2067,220 @@ Connection: close
         assert_eq!(result["frameTree"]["frame"]["loaderId"], "doc");
         assert_eq!(next_id, 2);
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn diagnostic_event_metadata_is_byte_bounded() {
+        let mut buffer = CdpEventBuffer::default();
+        record_cdp_event(
+            &mut buffer,
+            &json!({
+                "method": "Runtime.exceptionThrown",
+                "params": {
+                    "exceptionDetails": {
+                        "text": "boom",
+                        "url": format!("https://example.test/{}", "x".repeat(crate::types::MAX_URL_BYTES * 2)),
+                    }
+                }
+            }),
+        );
+        let console = buffer.console.back().unwrap();
+        assert!(console.source.as_ref().unwrap().len() <= crate::types::MAX_URL_BYTES);
+
+        record_cdp_event(
+            &mut buffer,
+            &json!({
+                "method": "Network.requestWillBeSent",
+                "params": {
+                    "requestId": "bounded-metadata",
+                    "request": {
+                        "method": "M".repeat(512),
+                        "url": "https://example.test/",
+                    },
+                    "type": "T".repeat(512),
+                }
+            }),
+        );
+        let network = buffer.network.get("bounded-metadata").unwrap();
+        assert!(network.method.len() <= 128);
+        assert!(network.resource_type.as_ref().unwrap().len() <= 64);
+    }
+
+    #[test]
+    fn clear_diagnostics_uses_cdp_barrier_before_resetting_buffer() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut websocket = accept(stream).unwrap();
+            let request = websocket.read().unwrap();
+            let Message::Text(request) = request else {
+                panic!("expected clear barrier request");
+            };
+            let request: Value = serde_json::from_str(&request).unwrap();
+            assert_eq!(request["method"], "Page.getFrameTree");
+            websocket
+                .send(Message::Text(
+                    json!({
+                        "method": "Runtime.consoleAPICalled",
+                        "params": {"type": "error", "args": [{"value": "before-clear"}]}
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .unwrap();
+            websocket
+                .send(Message::Text(
+                    json!({"id": request["id"], "result": {"frameTree": {}}})
+                        .to_string()
+                        .into(),
+                ))
+                .unwrap();
+            websocket
+                .send(Message::Text(
+                    json!({
+                        "method": "Runtime.consoleAPICalled",
+                        "params": {"type": "error", "args": [{"value": "after-clear"}]}
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .unwrap();
+            thread::sleep(Duration::from_millis(300));
+        });
+        let endpoint = Url::parse(&format!(
+            "ws://127.0.0.1:{}/devtools/page/clear",
+            address.port()
+        ))
+        .unwrap();
+        let websocket =
+            open_loopback_websocket(&endpoint, Instant::now() + Duration::from_secs(1)).unwrap();
+        let mut collector = CdpEventCollector {
+            websocket,
+            events: CdpEventBuffer::default(),
+        };
+        collector.events.push_console(BackendConsoleEntry {
+            level: "error".into(),
+            text: "buffered-before-clear".into(),
+            source: None,
+            timestamp: None,
+        });
+        let mut next_id = 1;
+        clear_event_collector(&mut collector, &mut next_id).unwrap();
+        assert!(collector.events.console.is_empty());
+        drain_event_collector(&mut collector).unwrap();
+        assert_eq!(collector.events.console.len(), 1);
+        assert_eq!(
+            collector.events.console.front().unwrap().text,
+            "after-clear"
+        );
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn clear_diagnostics_barrier_failure_is_not_started_and_preserves_buffer() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut websocket = accept(stream).unwrap();
+            let _ = websocket.read().unwrap();
+            // Close without acknowledging the read-only barrier. The diagnostic
+            // reset has not happened, so the caller must see a pre-effect failure.
+        });
+        let endpoint = Url::parse(&format!(
+            "ws://127.0.0.1:{}/devtools/page/clear-failure",
+            address.port()
+        ))
+        .unwrap();
+        let websocket =
+            open_loopback_websocket(&endpoint, Instant::now() + Duration::from_secs(1)).unwrap();
+        let mut collector = CdpEventCollector {
+            websocket,
+            events: CdpEventBuffer::default(),
+        };
+        collector.events.push_console(BackendConsoleEntry {
+            level: "error".into(),
+            text: "must-survive-failed-clear".into(),
+            source: None,
+            timestamp: None,
+        });
+        let mut next_id = 1;
+        let error = clear_event_collector(&mut collector, &mut next_id).unwrap_err();
+        assert_eq!(
+            error.execution_state,
+            crate::types::ExecutionState::NotStarted
+        );
+        assert_eq!(collector.events.console.len(), 1);
+        assert_eq!(
+            collector.events.console.front().unwrap().text,
+            "must-survive-failed-clear"
+        );
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn diagnostic_event_buffers_roll_forward_instead_of_freezing_at_capacity() {
+        let mut buffer = CdpEventBuffer::default();
+        for index in 0..crate::types::MAX_CONSOLE_ENTRIES + 2 {
+            record_cdp_event(
+                &mut buffer,
+                &json!({
+                    "method": "Runtime.consoleAPICalled",
+                    "params": {
+                        "type": if index + 1 == crate::types::MAX_CONSOLE_ENTRIES + 2 { "error" } else { "log" },
+                        "args": [{"value": format!("console-{index}")}],
+                        "timestamp": index as f64,
+                    }
+                }),
+            );
+        }
+        assert_eq!(buffer.console.len(), crate::types::MAX_CONSOLE_ENTRIES);
+        assert!(buffer.console_truncated);
+        assert_eq!(buffer.console.front().unwrap().text, "console-2");
+        assert_eq!(
+            buffer.console.back().unwrap().level,
+            "error",
+            "a late error must not be starved by earlier benign console traffic"
+        );
+
+        for index in 0..crate::types::MAX_NETWORK_ENTRIES + 2 {
+            record_cdp_event(
+                &mut buffer,
+                &json!({
+                    "method": "Network.requestWillBeSent",
+                    "params": {
+                        "requestId": format!("request-{index}"),
+                        "request": {"method": "GET", "url": format!("https://example.test/{index}")},
+                        "type": "Fetch",
+                        "timestamp": index as f64,
+                    }
+                }),
+            );
+        }
+        assert_eq!(buffer.network.len(), crate::types::MAX_NETWORK_ENTRIES);
+        assert!(buffer.network_truncated);
+        assert!(!buffer.network.contains_key("request-0"));
+        assert!(!buffer.network.contains_key("request-1"));
+        let latest = format!("request-{}", crate::types::MAX_NETWORK_ENTRIES + 1);
+        record_cdp_event(
+            &mut buffer,
+            &json!({
+                "method": "Network.loadingFailed",
+                "params": {"requestId": latest, "errorText": "late failure"}
+            }),
+        );
+        assert_eq!(
+            buffer
+                .network
+                .get(&format!(
+                    "request-{}",
+                    crate::types::MAX_NETWORK_ENTRIES + 1
+                ))
+                .and_then(|entry| entry.failed_reason.as_deref()),
+            Some("late failure"),
+            "a late failed request must remain diagnosable after the buffer fills"
+        );
     }
 
     #[test]
