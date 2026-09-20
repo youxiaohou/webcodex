@@ -183,6 +183,46 @@ impl ToolRuntime {
                 )
                 .await
             }
+            ToolCall::BrowserObserve(BrowserObserveToolCall::Console {
+                client_id,
+                browser_id,
+                page_id,
+            }) => {
+                self.dispatch_browser_request(
+                    &client_id,
+                    "browser_console",
+                    json!({"browser_id": browser_id, "page_id": page_id}),
+                    auth,
+                    false,
+                    BrowserRecoveryContext::snapshot(&client_id, &browser_id, &page_id),
+                )
+                .await
+            }
+            ToolCall::BrowserObserve(BrowserObserveToolCall::Network {
+                client_id,
+                browser_id,
+                page_id,
+            }) => {
+                self.dispatch_browser_request(
+                    &client_id,
+                    "browser_network",
+                    json!({"browser_id": browser_id, "page_id": page_id}),
+                    auth,
+                    false,
+                    BrowserRecoveryContext::snapshot(&client_id, &browser_id, &page_id),
+                )
+                .await
+            }
+            ToolCall::BrowserObserve(BrowserObserveToolCall::Diagnostics {
+                client_id, browser_id, page_id, include_all_console, include_all_network,
+            }) => {
+                self.dispatch_browser_request(
+                    &client_id, "browser_diagnostics",
+                    json!({"browser_id": browser_id, "page_id": page_id,
+                        "include_all_console": include_all_console, "include_all_network": include_all_network}),
+                    auth, false, BrowserRecoveryContext::snapshot(&client_id, &browser_id, &page_id),
+                ).await
+            }
             ToolCall::BrowserObserve(BrowserObserveToolCall::Screenshot {
                 client_id,
                 browser_id,
@@ -238,6 +278,15 @@ impl ToolRuntime {
                     BrowserRecoveryContext::snapshot(&client_id, &browser_id, &page_id),
                 )
                 .await
+            }
+            ToolCall::BrowserAct(BrowserActToolCall::Reload {
+                client_id, browser_id, page_id,
+            }) => {
+                self.dispatch_browser_request(
+                    &client_id, "browser_reload",
+                    json!({"browser_id": browser_id, "page_id": page_id}),
+                    auth, true, BrowserRecoveryContext::snapshot(&client_id, &browser_id, &page_id),
+                ).await
             }
             ToolCall::BrowserAct(BrowserActToolCall::Click {
                 client_id,
@@ -390,6 +439,15 @@ impl ToolRuntime {
                 )
                 .await
             }
+            ToolCall::BrowserAct(BrowserActToolCall::ClearDiagnostics {
+                client_id, browser_id, page_id,
+            }) => {
+                self.dispatch_browser_request(
+                    &client_id, "browser_clear_diagnostics",
+                    json!({"browser_id": browser_id, "page_id": page_id}),
+                    auth, true, BrowserRecoveryContext::snapshot(&client_id, &browser_id, &page_id),
+                ).await
+            }
             ToolCall::BrowserAct(BrowserActToolCall::ClosePage {
                 client_id,
                 browser_id,
@@ -494,10 +552,14 @@ impl ToolRuntime {
             "browser_list_browsers"
             | "browser_list_pages"
             | "browser_snapshot"
-            | "browser_screenshot" => RunnerFeature::BrowserObserve,
+            | "browser_screenshot"
+            | "browser_console"
+            | "browser_network"
+            | "browser_diagnostics" => RunnerFeature::BrowserObserve,
             "browser_launch" => RunnerFeature::BrowserLaunch,
             "browser_new_page"
             | "browser_navigate"
+            | "browser_reload"
             | "browser_click"
             | "browser_input_text"
             | "browser_select_option"
@@ -505,6 +567,7 @@ impl ToolRuntime {
             | "browser_upload_file"
             | "browser_key"
             | "browser_close_page"
+            | "browser_clear_diagnostics"
             | "browser_close" => RunnerFeature::BrowserControl,
             _ => {
                 return browser_error(

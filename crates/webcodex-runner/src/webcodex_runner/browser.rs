@@ -44,6 +44,17 @@ struct PageRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct DiagnosticsRequest {
+    browser_id: String,
+    page_id: String,
+    #[serde(default)]
+    include_all_console: bool,
+    #[serde(default)]
+    include_all_network: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct NavigateRequest {
     browser_id: String,
     page_id: String,
@@ -142,6 +153,27 @@ pub(crate) fn handle_browser_operation(
                         .screenshot(&request.browser_id, &request.page_id)
                         .map(|v| json!(v))
                 }),
+            RunnerBrowserOperationKind::Console => parse::<PageRequest>(&operation.payload)
+                .and_then(|request| supervisor.console(&request.browser_id, &request.page_id)),
+            RunnerBrowserOperationKind::Network => parse::<PageRequest>(&operation.payload)
+                .and_then(|request| supervisor.network(&request.browser_id, &request.page_id)),
+            RunnerBrowserOperationKind::Diagnostics => {
+                parse::<DiagnosticsRequest>(&operation.payload).and_then(|request| {
+                    supervisor.diagnostics(
+                        &request.browser_id,
+                        &request.page_id,
+                        request.include_all_console,
+                        request.include_all_network,
+                    )
+                })
+            }
+            RunnerBrowserOperationKind::ClearDiagnostics => {
+                parse::<PageRequest>(&operation.payload).and_then(|request| {
+                    supervisor
+                        .clear_diagnostics(&request.browser_id, &request.page_id)
+                        .map(|_| json!({}))
+                })
+            }
             RunnerBrowserOperationKind::Launch => parse::<EmptyRequest>(&operation.payload)
                 .and_then(|_| supervisor.launch().map(|v| json!(v))),
             RunnerBrowserOperationKind::NewPage => parse::<BrowserRequest>(&operation.payload)
@@ -150,6 +182,12 @@ pub(crate) fn handle_browser_operation(
                 .and_then(|request| {
                     supervisor
                         .navigate(&request.browser_id, &request.page_id, &request.url)
+                        .map(|_| json!({}))
+                }),
+            RunnerBrowserOperationKind::Reload => parse::<PageRequest>(&operation.payload)
+                .and_then(|request| {
+                    supervisor
+                        .reload(&request.browser_id, &request.page_id)
                         .map(|_| json!({}))
                 }),
             RunnerBrowserOperationKind::Click => parse::<ElementRequest>(&operation.payload)

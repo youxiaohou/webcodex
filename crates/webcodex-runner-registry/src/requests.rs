@@ -2350,10 +2350,14 @@ impl RunnerRegistry {
             "browser_list_browsers"
             | "browser_list_pages"
             | "browser_snapshot"
-            | "browser_screenshot" => RunnerFeature::BrowserObserve,
+            | "browser_screenshot"
+            | "browser_console"
+            | "browser_network"
+            | "browser_diagnostics" => RunnerFeature::BrowserObserve,
             "browser_launch" => RunnerFeature::BrowserLaunch,
             "browser_new_page"
             | "browser_navigate"
+            | "browser_reload"
             | "browser_click"
             | "browser_input_text"
             | "browser_select_option"
@@ -2361,6 +2365,7 @@ impl RunnerRegistry {
             | "browser_upload_file"
             | "browser_key"
             | "browser_close_page"
+            | "browser_clear_diagnostics"
             | "browser_close" => RunnerFeature::BrowserControl,
             _ => return Err("invalid browser request kind".to_string()),
         };

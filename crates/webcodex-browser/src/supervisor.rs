@@ -296,6 +296,102 @@ impl BrowserSupervisor {
         screenshot_result(browser_id, page_id, shot)
     }
 
+    pub fn console(&self, browser_id: &str, page_id: &str) -> BrowserResult<serde_json::Value> {
+        self.touch_current(browser_id)?;
+        let mut state = self.operation_state()?;
+        let runtime = state
+            .browsers
+            .get_mut(browser_id)
+            .ok_or_else(|| stale_browser(browser_id))?;
+        let target_id = runtime.page_target(page_id)?;
+        let entries = runtime.backend.console(&target_id)?;
+        Ok(
+            serde_json::json!({"count": entries.len(), "entries": entries.into_iter().map(|entry| serde_json::json!({
+            "level": entry.level, "text": entry.text, "source": entry.source, "timestamp": entry.timestamp
+        })).collect::<Vec<_>>() }),
+        )
+    }
+
+    pub fn network(&self, browser_id: &str, page_id: &str) -> BrowserResult<serde_json::Value> {
+        self.touch_current(browser_id)?;
+        let mut state = self.operation_state()?;
+        let runtime = state
+            .browsers
+            .get_mut(browser_id)
+            .ok_or_else(|| stale_browser(browser_id))?;
+        let target_id = runtime.page_target(page_id)?;
+        let entries = runtime.backend.network(&target_id)?;
+        Ok(
+            serde_json::json!({"count": entries.len(), "entries": entries.into_iter().map(|entry| serde_json::json!({
+            "method": entry.method, "url": entry.url, "resource_type": entry.resource_type,
+            "status": entry.status, "failed_reason": entry.failed_reason, "timestamp": entry.timestamp
+        })).collect::<Vec<_>>() }),
+        )
+    }
+
+    pub fn diagnostics(
+        &self,
+        browser_id: &str,
+        page_id: &str,
+        include_all_console: bool,
+        include_all_network: bool,
+    ) -> BrowserResult<serde_json::Value> {
+        self.touch_current(browser_id)?;
+        let mut state = self.operation_state()?;
+        let runtime = state
+            .browsers
+            .get_mut(browser_id)
+            .ok_or_else(|| stale_browser(browser_id))?;
+        let target_id = runtime.page_target(page_id)?;
+        let console = runtime.backend.console(&target_id)?;
+        let network = runtime.backend.network(&target_id)?;
+        let console_total = console.len();
+        let network_total = network.len();
+        let console = console
+            .into_iter()
+            .filter(|entry| {
+                include_all_console
+                    || matches!(
+                        entry.level.as_str(),
+                        "error" | "warning" | "warn" | "exception"
+                    )
+            })
+            .collect::<Vec<_>>();
+        let network = network
+            .into_iter()
+            .filter(|entry| {
+                include_all_network
+                    || entry.failed_reason.is_some()
+                    || entry.status.is_some_and(|status| status >= 400)
+                    || matches!(entry.resource_type.as_deref(), Some("XHR") | Some("Fetch"))
+            })
+            .collect::<Vec<_>>();
+        Ok(serde_json::json!({
+            "console_total": console_total,
+            "console_count": console.len(),
+            "console": console.into_iter().map(|entry| serde_json::json!({
+                "level": entry.level, "text": entry.text, "source": entry.source, "timestamp": entry.timestamp
+            })).collect::<Vec<_>>(),
+            "network_total": network_total,
+            "network_count": network.len(),
+            "network": network.into_iter().map(|entry| serde_json::json!({
+                "method": entry.method, "url": entry.url, "resource_type": entry.resource_type,
+                "status": entry.status, "failed_reason": entry.failed_reason, "timestamp": entry.timestamp
+            })).collect::<Vec<_>>()
+        }))
+    }
+
+    pub fn clear_diagnostics(&self, browser_id: &str, page_id: &str) -> BrowserResult<()> {
+        self.touch_current(browser_id)?;
+        let mut state = self.operation_state()?;
+        let runtime = state
+            .browsers
+            .get_mut(browser_id)
+            .ok_or_else(|| stale_browser(browser_id))?;
+        let target_id = runtime.page_target(page_id)?;
+        runtime.backend.clear_diagnostics(&target_id)
+    }
+
     pub fn navigate(&self, browser_id: &str, page_id: &str, url: &str) -> BrowserResult<()> {
         self.touch_current(browser_id)?;
         validate_navigation_url(url)?;
@@ -309,6 +405,18 @@ impl BrowserSupervisor {
         // dispatch; uncertain outcomes remain stale rather than silently retargeting.
         runtime.invalidate_elements_for_page(page_id);
         runtime.backend.navigate(&target_id, url)
+    }
+
+    pub fn reload(&self, browser_id: &str, page_id: &str) -> BrowserResult<()> {
+        self.touch_current(browser_id)?;
+        let mut state = self.operation_state()?;
+        let runtime = state
+            .browsers
+            .get_mut(browser_id)
+            .ok_or_else(|| stale_browser(browser_id))?;
+        let target_id = runtime.page_target(page_id)?;
+        runtime.invalidate_elements_for_page(page_id);
+        runtime.backend.reload(&target_id)
     }
 
     pub fn click(&self, browser_id: &str, page_id: &str, element_id: &str) -> BrowserResult<()> {
@@ -808,7 +916,9 @@ fn opaque_id(prefix: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cdp::{BackendFactory, BackendSnapshot, BrowserBackend};
+    use crate::cdp::{
+        BackendConsoleEntry, BackendFactory, BackendNetworkEntry, BackendSnapshot, BrowserBackend,
+    };
     use crate::types::ExecutionState;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -917,7 +1027,23 @@ mod tests {
                 height: 600,
             })
         }
+        fn console(&mut self, _target_id: &str) -> BrowserResult<Vec<BackendConsoleEntry>> {
+            Ok(Vec::new())
+        }
+        fn network(&mut self, _target_id: &str) -> BrowserResult<Vec<BackendNetworkEntry>> {
+            Ok(Vec::new())
+        }
+        fn clear_diagnostics(&mut self, _target_id: &str) -> BrowserResult<()> {
+            Ok(())
+        }
         fn navigate(&mut self, _target_id: &str, _url: &str) -> BrowserResult<()> {
+            self.document_generation += 1;
+            for page in &mut self.pages {
+                page.document_id = format!("doc-{}", self.document_generation);
+            }
+            Ok(())
+        }
+        fn reload(&mut self, _target_id: &str) -> BrowserResult<()> {
             self.document_generation += 1;
             for page in &mut self.pages {
                 page.document_id = format!("doc-{}", self.document_generation);
@@ -1043,6 +1169,29 @@ mod tests {
                 &page.page_id,
                 "https://example.test/next",
             )
+            .unwrap();
+        let error = supervisor
+            .click(&browser.browser_id, &page.page_id, &element)
+            .unwrap_err();
+        assert_eq!(error.kind, "stale_element");
+        assert_eq!(error.execution_state, ExecutionState::NotStarted);
+        assert_eq!(error.recovery_action, Some("snapshot"));
+    }
+
+    #[test]
+    fn reload_invalidates_prior_element_authority() {
+        let supervisor = fixture();
+        let browser = supervisor.launch().unwrap();
+        let page = supervisor.pages(&browser.browser_id, 8).unwrap().remove(0);
+        let element = supervisor
+            .snapshot(&browser.browser_id, &page.page_id)
+            .unwrap()
+            .nodes[0]
+            .element_id
+            .clone()
+            .unwrap();
+        supervisor
+            .reload(&browser.browser_id, &page.page_id)
             .unwrap();
         let error = supervisor
             .click(&browser.browser_id, &page.page_id, &element)

@@ -85,6 +85,16 @@ fn browser_act_audit_projection(call: &BrowserActToolCall) -> Value {
             "page_id": page_id,
             "url_present": true,
         }),
+        BrowserActToolCall::Reload {
+            client_id,
+            browser_id,
+            page_id,
+        } => serde_json::json!({
+            "action": "reload",
+            "client_id": client_id,
+            "browser_id": browser_id,
+            "page_id": page_id,
+        }),
         BrowserActToolCall::Click {
             client_id,
             browser_id,
@@ -170,6 +180,16 @@ fn browser_act_audit_projection(call: &BrowserActToolCall) -> Value {
             "browser_id": browser_id,
             "page_id": page_id,
             "key": key.as_str(),
+        }),
+        BrowserActToolCall::ClearDiagnostics {
+            client_id,
+            browser_id,
+            page_id,
+        } => serde_json::json!({
+            "action": "clear_diagnostics",
+            "client_id": client_id,
+            "browser_id": browser_id,
+            "page_id": page_id,
         }),
         BrowserActToolCall::ClosePage {
             client_id,

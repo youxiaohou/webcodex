@@ -578,6 +578,40 @@ pub enum BrowserObserveToolCall {
         #[schemars(regex(pattern = "^page_[A-Za-z0-9_-]{16,64}$"))]
         page_id: String,
     },
+    Console {
+        #[schemars(length(min = 1, max = 128))]
+        client_id: String,
+        #[schemars(length(min = 1, max = 128))]
+        #[schemars(regex(pattern = "^browser_[A-Za-z0-9_-]{16,64}$"))]
+        browser_id: String,
+        #[schemars(length(min = 1, max = 128))]
+        #[schemars(regex(pattern = "^page_[A-Za-z0-9_-]{16,64}$"))]
+        page_id: String,
+    },
+    Network {
+        #[schemars(length(min = 1, max = 128))]
+        client_id: String,
+        #[schemars(length(min = 1, max = 128))]
+        #[schemars(regex(pattern = "^browser_[A-Za-z0-9_-]{16,64}$"))]
+        browser_id: String,
+        #[schemars(length(min = 1, max = 128))]
+        #[schemars(regex(pattern = "^page_[A-Za-z0-9_-]{16,64}$"))]
+        page_id: String,
+    },
+    Diagnostics {
+        #[schemars(length(min = 1, max = 128))]
+        client_id: String,
+        #[schemars(length(min = 1, max = 128))]
+        #[schemars(regex(pattern = "^browser_[A-Za-z0-9_-]{16,64}$"))]
+        browser_id: String,
+        #[schemars(length(min = 1, max = 128))]
+        #[schemars(regex(pattern = "^page_[A-Za-z0-9_-]{16,64}$"))]
+        page_id: String,
+        #[serde(default)]
+        include_all_console: bool,
+        #[serde(default)]
+        include_all_network: bool,
+    },
     Screenshot {
         #[schemars(length(min = 1, max = 128))]
         client_id: String,
@@ -597,6 +631,9 @@ impl BrowserObserveToolCall {
             Self::Browsers { .. } => "browsers",
             Self::Pages { .. } => "pages",
             Self::Snapshot { .. } => "snapshot",
+            Self::Console { .. } => "console",
+            Self::Network { .. } => "network",
+            Self::Diagnostics { .. } => "diagnostics",
             Self::Screenshot { .. } => "screenshot",
         }
     }
@@ -668,6 +705,16 @@ pub enum BrowserActToolCall {
         #[schemars(length(min = 1, max = 8192))]
         #[schemars(regex(pattern = "^https?://"))]
         url: String,
+    },
+    Reload {
+        #[schemars(length(min = 1, max = 128))]
+        client_id: String,
+        #[schemars(length(min = 1, max = 128))]
+        #[schemars(regex(pattern = "^browser_[A-Za-z0-9_-]{16,64}$"))]
+        browser_id: String,
+        #[schemars(length(min = 1, max = 128))]
+        #[schemars(regex(pattern = "^page_[A-Za-z0-9_-]{16,64}$"))]
+        page_id: String,
     },
     Click {
         #[schemars(length(min = 1, max = 128))]
@@ -759,6 +806,16 @@ pub enum BrowserActToolCall {
         page_id: String,
         key: BrowserKeyCall,
     },
+    ClearDiagnostics {
+        #[schemars(length(min = 1, max = 128))]
+        client_id: String,
+        #[schemars(length(min = 1, max = 128))]
+        #[schemars(regex(pattern = "^browser_[A-Za-z0-9_-]{16,64}$"))]
+        browser_id: String,
+        #[schemars(length(min = 1, max = 128))]
+        #[schemars(regex(pattern = "^page_[A-Za-z0-9_-]{16,64}$"))]
+        page_id: String,
+    },
     ClosePage {
         #[schemars(length(min = 1, max = 128))]
         client_id: String,
@@ -784,12 +841,14 @@ impl BrowserActToolCall {
             Self::Launch { .. } => "launch",
             Self::NewPage { .. } => "new_page",
             Self::Navigate { .. } => "navigate",
+            Self::Reload { .. } => "reload",
             Self::Click { .. } => "click",
             Self::InputText { .. } => "input_text",
             Self::SelectOption { .. } => "select_option",
             Self::SetValue { .. } => "set_value",
             Self::UploadFile { .. } => "upload_file",
             Self::Key { .. } => "key",
+            Self::ClearDiagnostics { .. } => "clear_diagnostics",
             Self::ClosePage { .. } => "close_page",
             Self::CloseBrowser { .. } => "close_browser",
         }
