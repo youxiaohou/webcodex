@@ -65,6 +65,36 @@ fn node_schema() -> Value {
     })
 }
 
+fn console_entry_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "level": {"type": "string", "maxLength": 64},
+            "text": {"type": "string", "maxLength": 2048},
+            "source": {"anyOf": [{"type": "string", "maxLength": 8192}, {"type": "null"}]},
+            "timestamp": {"anyOf": [{"type": "number"}, {"type": "null"}]}
+        },
+        "required": ["level", "text", "source", "timestamp"]
+    })
+}
+
+fn network_entry_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "method": {"type": "string", "maxLength": 128},
+            "url": {"type": "string", "maxLength": 8192},
+            "resource_type": {"anyOf": [{"type": "string", "maxLength": 64}, {"type": "null"}]},
+            "status": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 65535}, {"type": "null"}]},
+            "failed_reason": {"anyOf": [{"type": "string", "maxLength": 512}, {"type": "null"}]},
+            "timestamp": {"anyOf": [{"type": "number"}, {"type": "null"}]}
+        },
+        "required": ["method", "url", "resource_type", "status", "failed_reason", "timestamp"]
+    })
+}
+
 fn recovery_schema() -> Value {
     let client = json!({"type": "string", "minLength": 1, "maxLength": 128});
     let browser = json!({"type": "string", "minLength": 1, "maxLength": 128});
@@ -150,10 +180,48 @@ pub fn output_schema_for_tool(name: &str) -> Option<Value> {
                 ),
                 (
                     "count",
-                    json!({"type": "integer", "minimum": 0, "maximum": 64}),
+                    json!({"type": "integer", "minimum": 0, "maximum": 300}),
                 ),
                 ("total_count", json!({"type": "integer", "minimum": 0})),
                 ("truncated", json!({"type": "boolean"})),
+                (
+                    "retained_count",
+                    json!({"type": "integer", "minimum": 0, "maximum": 300}),
+                ),
+                (
+                    "entries",
+                    json!({
+                        "type": "array",
+                        "maxItems": 300,
+                        "items": {"oneOf": [console_entry_schema(), network_entry_schema()]}
+                    }),
+                ),
+                (
+                    "console_retained",
+                    json!({"type": "integer", "minimum": 0, "maximum": 200}),
+                ),
+                (
+                    "console_count",
+                    json!({"type": "integer", "minimum": 0, "maximum": 200}),
+                ),
+                ("console_truncated", json!({"type": "boolean"})),
+                (
+                    "console",
+                    json!({"type": "array", "maxItems": 200, "items": console_entry_schema()}),
+                ),
+                (
+                    "network_retained",
+                    json!({"type": "integer", "minimum": 0, "maximum": 300}),
+                ),
+                (
+                    "network_count",
+                    json!({"type": "integer", "minimum": 0, "maximum": 300}),
+                ),
+                ("network_truncated", json!({"type": "boolean"})),
+                (
+                    "network",
+                    json!({"type": "array", "maxItems": 300, "items": network_entry_schema()}),
+                ),
                 (
                     "browser_id",
                     json!({"type": "string", "minLength": 1, "maxLength": 128}),

@@ -133,6 +133,39 @@ fn browser_output_schemas_accept_canonical_results_and_reject_leaked_fields() {
         .unwrap();
     validate_observe(&screenshot).unwrap();
 
+    let console = serde_json::to_value(crate::tool_runtime::tool_result::ToolResult::ok(json!({
+        "execution_state": "completed",
+        "state_changed": false,
+        "retained_count": 200,
+        "count": 2,
+        "truncated": true,
+        "entries": [
+            {"level":"warning","text":"warn","source":null,"timestamp":1.0},
+            {"level":"error","text":"boom","source":"https://example.test/app.js","timestamp":2.0}
+        ]
+    })))
+    .unwrap();
+    validate_observe(&console).unwrap();
+
+    let diagnostics = serde_json::to_value(crate::tool_runtime::tool_result::ToolResult::ok(json!({
+        "execution_state": "completed",
+        "state_changed": false,
+        "console_retained": 200,
+        "console_count": 1,
+        "console_truncated": true,
+        "console": [
+            {"level":"exception","text":"boom","source":null,"timestamp":3.0}
+        ],
+        "network_retained": 300,
+        "network_count": 1,
+        "network_truncated": false,
+        "network": [
+            {"method":"GET","url":"https://example.test/api","resource_type":"Fetch","status":500,"failed_reason":null,"timestamp":4.0}
+        ]
+    })))
+    .unwrap();
+    validate_observe(&diagnostics).unwrap();
+
     let launch = serde_json::to_value(crate::tool_runtime::tool_result::ToolResult::ok(json!({
         "execution_state": "completed",
         "state_changed": true,
