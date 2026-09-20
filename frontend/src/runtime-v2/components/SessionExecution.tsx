@@ -1,15 +1,15 @@
 import {
   Bot,
-  ChevronDown,
   CircleDot,
   Clock3,
   LoaderCircle,
   MessageSquare,
   TerminalSquare,
 } from "lucide-react";
+import { useEffect, useState } from "react";
 import type { RuntimeLanguage } from "../../runtime_i18n.js";
 import { translate } from "../../runtime_i18n.js";
-import { relativeTime, shortId } from "../model/format.js";
+import { absoluteTime, relativeTime, shortId } from "../model/format.js";
 import { groupRecentProgress, type WorkItem } from "../model/work.js";
 import type { SessionLocation, SessionWorkspaceState } from "../state/useSessionWorkspace.js";
 import { BUCKET_LABEL } from "./WorkList.js";
@@ -28,6 +28,18 @@ type Props = {
 export function SessionExecution({ item, location, session, language }: Props) {
   const t = (value: string) => translate(value, language);
   const progress = groupRecentProgress(session.detail);
+  const messagesById = new Map((session.messages?.messages || []).map((message) => [message.message_id, message]));
+  const [centerTab, setCenterTab] = useState<"workflow" | "collaboration">("workflow");
+
+  useEffect(() => {
+    setCenterTab("workflow");
+  }, [location.projectId, location.sessionId]);
+
+  useEffect(() => {
+    const openCollaboration = () => setCenterTab("collaboration");
+    window.addEventListener("webcodex-runtime-compose-message", openCollaboration);
+    return () => window.removeEventListener("webcodex-runtime-compose-message", openCollaboration);
+  }, []);
 
   return (
     <main className="session-main">
@@ -44,7 +56,39 @@ export function SessionExecution({ item, location, session, language }: Props) {
         </div>
       </header>
 
-      <div className="timeline-scroll">
+      <div className="session-view-tabs" role="tablist" aria-label={t("Work view")}>
+        <button
+          id="workflow-tab"
+          role="tab"
+          aria-selected={centerTab === "workflow"}
+          aria-controls="workflow-panel"
+          className={centerTab === "workflow" ? "active" : ""}
+          type="button"
+          onClick={() => setCenterTab("workflow")}
+        >
+          {t("Workflow")}
+        </button>
+        <button
+          id="collaboration-tab"
+          role="tab"
+          aria-selected={centerTab === "collaboration"}
+          aria-controls="collaboration-panel"
+          className={centerTab === "collaboration" ? "active" : ""}
+          type="button"
+          onClick={() => setCenterTab("collaboration")}
+        >
+          {t("Collaboration")}
+          <span>{session.messages?.messages.length || 0}</span>
+        </button>
+      </div>
+
+      <div
+        id="workflow-panel"
+        className="timeline-scroll session-center-pane workflow-pane"
+        role="tabpanel"
+        aria-labelledby="workflow-tab"
+        hidden={centerTab !== "workflow"}
+      >
         <div className="timeline-measure">
           <div className="task-run">
             <section className="task-prompt">
@@ -77,28 +121,19 @@ export function SessionExecution({ item, location, session, language }: Props) {
               )}
             </section>
 
-            {(item.currentActivity || item.runningJobs > 0) && (
+            {item.runningJobs > 0 && (
               <section className="active-command">
                 <div className="active-command-head">
                   <span><TerminalSquare size={15} /></span>
                   <div>
                     <strong>{t("Current execution")}</strong>
-                    <code>
-                      {item.currentActivity?.summary ||
-                        item.currentActivity?.tool ||
-                        item.currentActivity?.kind ||
-                        String(item.runningJobs) + " running Job" + (item.runningJobs === 1 ? "" : "s")}
-                    </code>
+                    <code>{String(item.runningJobs) + " " + t("Running Jobs")}</code>
                   </div>
                   <span className="command-running"><LoaderCircle size={13} /> {t("running")}</span>
                 </div>
                 <div className="active-command-foot">
-                  <span>{item.currentActivity?.tool || t("Session execution evidence")}</span>
-                  <span>
-                    {item.currentActivity?.job_id
-                      ? "Job " + shortId(item.currentActivity.job_id)
-                      : String(item.runningJobs) + " " + t("Running Jobs")}
-                  </span>
+                  <span>{t("Runner-owned Job execution")}</span>
+                  <span>{String(item.runningJobs) + " " + t("Running Jobs")}</span>
                 </div>
               </section>
             )}
@@ -135,60 +170,98 @@ export function SessionExecution({ item, location, session, language }: Props) {
                 </div>
               </article>
             )}
-
-            <details className="session-communication">
-              <summary>
-                <MessageSquare size={15} />
-                <strong>{t("Session communication")}</strong>
-                <span>{session.messages?.messages.length || 0}</span>
-                <ChevronDown size={15} />
-              </summary>
-              <div className="message-list">
-                {session.messages?.messages.map((message) => (
-                  <article className="retained-message" key={message.message_id}>
-                    <div className="message-meta">
-                      <strong>{message.author_session_id ? t("Agent / Session") : t("Retained message")}</strong>
-                      <time>{relativeTime(message.created_at)}</time>
-                    </div>
-                    <p>{message.message}</p>
-                    <div className="message-actions">
-                      <button
-                        type="button"
-                        onClick={() => window.dispatchEvent(new CustomEvent("webcodex-runtime-reply-message", {
-                          detail: { messageId: message.message_id, message: message.message },
-                        }))}
-                      >
-                        {t("Reply")}
-                      </button>
-                      {message.status === "open" && MUTABLE_MESSAGE_KINDS.has(message.kind) && session.mutationAllowed !== false && (
-                        <>
-                          <button
-                            type="button"
-                            onClick={() => window.dispatchEvent(new CustomEvent("webcodex-runtime-edit-message", {
-                              detail: { messageId: message.message_id, message: message.message },
-                            }))}
-                          >
-                            {t("Edit")}
-                          </button>
-                          <button type="button" onClick={() => void session.withdraw(message.message_id)}>{t("Withdraw")}</button>
-                        </>
-                      )}
-                    </div>
-                  </article>
-                ))}
-                {session.messagesAvailability === "denied" && (
-                  <p className="muted-copy">{t("Session messages are not available with this access key.")}</p>
-                )}
-                {session.messages?.messages.length === 0 && (
-                  <p className="muted-copy">{t("No retained Session messages.")}</p>
-                )}
-              </div>
-            </details>
           </div>
         </div>
       </div>
 
-      <SessionComposer location={location} session={session} language={language} />
+      <section
+        id="collaboration-panel"
+        className="collaboration-workspace session-center-pane"
+        role="tabpanel"
+        aria-labelledby="collaboration-tab"
+        hidden={centerTab !== "collaboration"}
+      >
+        <div className="collaboration-message-scroll" aria-label={t("Session communication")}>
+          <div className="message-list">
+            {session.messages?.messages.map((message) => (
+              <article className="retained-message" key={message.message_id}>
+                <div className="message-meta">
+                  <strong>{message.author_session_id ? t("Agent / Session") : t("Retained message")}</strong>
+                  <span className="message-kind">{t(message.kind)}</span>
+                  {message.requires_ack && (
+                    <span className={"message-state " + (message.first_ack_observed_at ? "good" : "warn")}>
+                      {t(message.first_ack_observed_at ? "ACK observed" : "Awaiting ACK")}
+                    </span>
+                  )}
+                  {message.status !== "open" && (
+                    <span className="message-state resolved">
+                      {t(message.closure_kind === "withdrawn" ? "Withdrawn" : message.closure_kind === "superseded" ? "Edited" : "Resolved")}
+                    </span>
+                  )}
+                  <time title={absoluteTime(message.created_at)}>{relativeTime(message.created_at)}</time>
+                </div>
+                {message.reply_to && (
+                  <div className="message-reply-context">
+                    <span>{t("Reply to")}</span>
+                    <span>{messagesById.get(message.reply_to)?.message.slice(0, 120) || shortId(message.reply_to)}</span>
+                  </div>
+                )}
+                <p>{message.message}</p>
+                {message.first_ack_observed_at && (
+                  <div className="message-observation-note">
+                    {t("ACK first observed")} · <time title={absoluteTime(message.first_ack_observed_at)}>{relativeTime(message.first_ack_observed_at)}</time>
+                  </div>
+                )}
+                {message.resolution && (
+                  <div className="message-resolution">
+                    <div>
+                      <strong>{t("Agent resolution")}</strong>
+                      {message.resolved_at && <time title={absoluteTime(message.resolved_at)}>{relativeTime(message.resolved_at)}</time>}
+                    </div>
+                    <p>{message.resolution}</p>
+                  </div>
+                )}
+                <div className="message-actions">
+                  <button
+                    type="button"
+                    onClick={() => window.dispatchEvent(new CustomEvent("webcodex-runtime-reply-message", {
+                      detail: { messageId: message.message_id, message: message.message },
+                    }))}
+                  >
+                    {t("Reply")}
+                  </button>
+                  {message.status === "open" && MUTABLE_MESSAGE_KINDS.has(message.kind) && session.mutationAllowed !== false && (
+                    <span className="message-mutable-hint">{t("Open · editable")}</span>
+                  )}
+                  {message.status === "open" && MUTABLE_MESSAGE_KINDS.has(message.kind) && session.mutationAllowed !== false && (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => window.dispatchEvent(new CustomEvent("webcodex-runtime-edit-message", {
+                          detail: { messageId: message.message_id, message: message.message },
+                        }))}
+                      >
+                        {t("Edit")}
+                      </button>
+                      <button type="button" onClick={() => void session.withdraw(message.message_id)}>{t("Withdraw")}</button>
+                    </>
+                  )}
+                </div>
+              </article>
+            ))}
+            {session.messagesAvailability === "loading" && !session.messages && (
+              <p className="muted-copy">{t("Loading Session messages…")}</p>
+            )}
+            {session.messagesAvailability === "denied" && (
+              <p className="muted-copy">{t("Session messages are not available with this access key.")}</p>
+            )}
+            {session.messages?.messages.length === 0 && (
+              <p className="muted-copy">{t("No retained Session messages.")}</p>
+            )}
+          </div>
+        </div>
+        <SessionComposer location={location} session={session} language={language} />
+      </section>
     </main>
   );
 }

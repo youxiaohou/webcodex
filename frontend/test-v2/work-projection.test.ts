@@ -8,7 +8,7 @@ import {
 import { recentSession, sessionDetail, sessionItem } from "./fixtures.js";
 
 describe("Work projection", () => {
-  it("prioritizes current calls and active Jobs without inventing a phase", () => {
+  it("treats only Runner Jobs as authoritative live execution", () => {
     const job = sessionItem({
       running_jobs: 1,
       running_jobs_complete: true,
@@ -32,9 +32,14 @@ describe("Work projection", () => {
         summary: "Run focused Runtime tests",
         paths: [],
       },
+      last_activity: undefined,
+      overview: {
+        ...sessionItem().overview,
+        reported_progress: undefined,
+      },
     });
-    expect(workBucket(call)).toBe("running");
-    expect(phaseFromSession(call)).toBe("Run focused Runtime tests");
+    expect(workBucket(call)).toBe("active");
+    expect(phaseFromSession(call)).toBe("active");
   });
 
   it("keeps inactive/no-Job Sessions out of Running", () => {
@@ -93,6 +98,30 @@ describe("Work projection", () => {
     expect(workItemFromRecent(failure).validation.unresolved_failure_count).toBe(2);
   });
 
+  it("accepts server activity rows with serde-omitted empty arrays", () => {
+    const detail = sessionDetail({
+      activity: [{
+        kind: "run",
+        tool: "run_process",
+        state: "success",
+        job_handoff: false,
+        started_at: 1_789_999_250,
+        finished_at: 1_789_999_251,
+        summary: "Executed command",
+      }],
+      activity_total: 1,
+      activity_returned: 1,
+    });
+
+    expect(groupRecentProgress(detail)).toEqual([
+      expect.objectContaining({
+        intent: "ran",
+        tools: ["run_process"],
+        paths: [],
+      }),
+    ]);
+  });
+
   it("groups low-level activity by user-facing intent and remains bounded", () => {
     const detail = sessionDetail({
       activity: [
@@ -116,7 +145,8 @@ describe("Work projection", () => {
       activity_returned: 3,
     });
     const groups = groupRecentProgress(detail);
-    expect(groups.map((group) => group.intent)).toEqual(["tested", "edited", "explored"]);
-    expect(groups[0].tools).toContain("cargo_test");
+    expect(groups.map((group) => group.intent)).toEqual(["explored", "edited", "tested"]);
+    expect(groups.at(-1)?.tools).toContain("cargo_test");
+    expect(groups.map((group) => group.latestAt)).toEqual([...groups.map((group) => group.latestAt)].sort((a, b) => a - b));
   });
 });

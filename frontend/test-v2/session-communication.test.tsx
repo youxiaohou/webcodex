@@ -64,7 +64,8 @@ describe("Session communication parity", () => {
       />,
     );
 
-    fireEvent.click(screen.getByText("Session communication"));
+    expect(screen.getByRole("tab", { name: "Workflow" }).getAttribute("aria-selected")).toBe("true");
+    fireEvent.click(screen.getByRole("tab", { name: /Collaboration/ }));
     const note = screen.getByText("Mutable note").closest("article")!;
     expect(within(note).getByRole("button", { name: "Reply" })).toBeTruthy();
     expect(within(note).getByRole("button", { name: "Edit" })).toBeTruthy();
@@ -86,6 +87,118 @@ describe("Session communication parity", () => {
     })));
   });
 
+  it("shows ACK, resolution, direct reply evidence, and Workflow activity time", () => {
+    const recent = recentSession();
+    const session = workspace({
+      messages: {
+        session_id: recent.session_id,
+        messages: [
+          {
+            message_id: "wc_msg_guidance123456",
+            kind: "guidance",
+            status: "resolved",
+            priority: "high",
+            created_at: 1_790_000_000,
+            message: "Please make the workflow easier to read.",
+            requires_ack: true,
+            first_ack_observed_at: 1_790_000_010,
+            resolved_at: 1_790_000_020,
+            resolution: "Workflow labels and details were enlarged.",
+          },
+          {
+            message_id: "wc_msg_answer12345678",
+            kind: "answer",
+            status: "open",
+            priority: "normal",
+            created_at: 1_790_000_021,
+            message: "I also kept the activity timestamps visible.",
+            requires_ack: false,
+            author_session_id: "wc_sess_agent123456789",
+            reply_to: "wc_msg_guidance123456",
+          },
+        ],
+      },
+    });
+    const rendered = render(
+      <SessionExecution
+        item={workItemFromRecent(recent)}
+        location={{ projectId: recent.project_id, projectName: recent.project_name || recent.project_id, runner: recent.client_id, sessionId: recent.session_id }}
+        session={session}
+        language="en"
+      />,
+    );
+
+    const activityTime = rendered.container.querySelector(".tool-cluster-time");
+    expect(activityTime?.textContent).toBeTruthy();
+    expect(activityTime?.textContent).not.toBe("—");
+
+    fireEvent.click(screen.getByRole("tab", { name: /Collaboration/ }));
+    expect(screen.getByText("ACK observed")).toBeTruthy();
+    expect(screen.getByText("Agent resolution")).toBeTruthy();
+    expect(screen.getByText("Workflow labels and details were enlarged.")).toBeTruthy();
+    expect(screen.getByText("Agent / Session")).toBeTruthy();
+    expect(screen.getByText("I also kept the activity timestamps visible.")).toBeTruthy();
+    expect(screen.getByText("Reply to")).toBeTruthy();
+  });
+
+  it("keeps retained unfinished calls from masquerading as live execution", () => {
+    const staleCall = recentSession({
+      running_call: true,
+      running_jobs: 0,
+      current_activity: {
+        kind: "search",
+        tool: "search_project_texts",
+        state: "running",
+        execution_state: "running",
+        job_handoff: false,
+        summary: "Old unmatched call",
+        paths: [],
+      },
+    });
+    const session = workspace({
+      detail: sessionDetail({
+        running_call: true,
+        running_jobs: 0,
+        current_activity: staleCall.current_activity,
+      }),
+    });
+    render(
+      <SessionExecution
+        item={workItemFromRecent(staleCall)}
+        location={{ projectId: staleCall.project_id, projectName: staleCall.project_name || staleCall.project_id, runner: staleCall.client_id, sessionId: staleCall.session_id }}
+        session={session}
+        language="en"
+      />,
+    );
+
+    expect(screen.queryByText("Current execution")).toBeNull();
+  });
+
+  it("makes guidance a first-class visible collaboration action", async () => {
+    const session = workspace();
+    const recent = recentSession();
+    render(
+      <SessionExecution
+        item={workItemFromRecent(recent)}
+        location={{ projectId: recent.project_id, projectName: recent.project_name || recent.project_id, runner: recent.client_id, sessionId: recent.session_id }}
+        session={session}
+        language="en"
+      />,
+    );
+
+    act(() => {
+      window.dispatchEvent(new CustomEvent("webcodex-runtime-compose-message", { detail: { kind: "guidance" } }));
+    });
+    expect(screen.getByRole("tab", { name: /Collaboration/ }).getAttribute("aria-selected")).toBe("true");
+    const composer = screen.getByRole("textbox", { name: "Send a message to this work session…" });
+    fireEvent.change(composer, { target: { value: "Please prioritize the current blocker." } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(session.send).toHaveBeenCalledWith(expect.objectContaining({
+      message: "Please prioritize the current blocker.",
+      kind: "guidance",
+    })));
+  });
+
   it("hides mutable actions after collaborate authority is denied", () => {
     const session = workspace({ mutationAllowed: false });
     const recent = recentSession();
@@ -102,11 +215,28 @@ describe("Session communication parity", () => {
         language="en"
       />,
     );
-    fireEvent.click(screen.getByText("Session communication"));
+    fireEvent.click(screen.getByRole("tab", { name: /Collaboration/ }));
     const note = screen.getByText("Mutable note").closest("article")!;
     expect(within(note).getByRole("button", { name: "Reply" })).toBeTruthy();
     expect(within(note).queryByRole("button", { name: "Edit" })).toBeNull();
     expect(within(note).queryByRole("button", { name: "Withdraw" })).toBeNull();
+  });
+
+  it("returns to Workflow when the selected Session changes", () => {
+    const session = workspace();
+    const recent = recentSession();
+    const props = {
+      item: workItemFromRecent(recent),
+      location: { projectId: recent.project_id, projectName: recent.project_name || recent.project_id, runner: recent.client_id, sessionId: recent.session_id },
+      session,
+      language: "en" as const,
+    };
+    const rendered = render(<SessionExecution {...props} />);
+    fireEvent.click(screen.getByRole("tab", { name: /Collaboration/ }));
+    expect(screen.getByRole("tab", { name: /Collaboration/ }).getAttribute("aria-selected")).toBe("true");
+
+    rendered.rerender(<SessionExecution {...props} location={{ ...props.location, sessionId: "wc_sess_abcdef0123456789" }} />);
+    expect(screen.getByRole("tab", { name: "Workflow" }).getAttribute("aria-selected")).toBe("true");
   });
 
   it("retains an explicit recovery notice when a send transport outcome is unknown", async () => {

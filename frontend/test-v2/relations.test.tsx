@@ -62,6 +62,35 @@ describe("Project / Session / Window relationships", () => {
     expect(screen.getByText("WebUI v2 rewrite")).toBeTruthy();
     await waitFor(() => expect(screen.getByText(/2 Windows/)).toBeTruthy());
     expect(screen.getByText(/1 Windows/)).toBeTruthy();
+    expect(screen.getByText("View Sessions")).toBeTruthy();
+  });
+
+  it("loads the selected Project's retained Sessions when its card is opened", async () => {
+    const overview = runtimeOverview();
+    const first = { ...overview.projects[0], id: "agent:special:first", name: "First Project", project_ref: "~p1" };
+    const second = { ...overview.projects[0], id: "agent:special:second", name: "Second Project", project_ref: "~p2" };
+    const firstSession = sessionItem({ session_id: "wc_sess_aaaaaaaaaaaaaaaa", title: "First project Session" });
+    const secondSession = sessionItem({ session_id: "wc_sess_bbbbbbbbbbbbbbbb", title: "Second project Session" });
+    const handler = vi.fn((path: string, payload: any) => {
+      if (path === "projects") return ok({ projects: [first, second], total: 2, truncated: false });
+      if (path === "project-git") return ok({ branch: "main", clean: true, git_available: true });
+      if (path === "workflow-sessions") {
+        const sessions = payload.project === second.id ? [secondSession] : [firstSession];
+        return ok({ sessions, total: 1, returned: 1, truncated: false });
+      }
+      if (path === "workflow-session") return ok(sessionDetail({ session_id: payload.session_id, linked_windows: [] }));
+      throw new Error("unexpected path " + path);
+    });
+    const client = fakeClient(handler);
+
+    render(
+      <ProjectsView client={client} language="en" runners={overview.runners} onOpenSession={vi.fn()} onUnauthorized={vi.fn()} />,
+    );
+    expect(await screen.findByText("First project Session")).toBeTruthy();
+
+    fireEvent.click(screen.getByTestId("project-card-" + second.id));
+    expect(await screen.findByText("Second project Session")).toBeTruthy();
+    expect(handler.mock.calls.some(([path, payload]) => path === "workflow-sessions" && payload.project === second.id)).toBe(true);
   });
 
   it("keeps Add Project a single non-replayed write after an uncertain result", async () => {
@@ -93,6 +122,22 @@ describe("Project / Session / Window relationships", () => {
     const secondKey = "b".repeat(64);
     const detail = windowDetail({
       client_window_key: firstKey,
+      activity: [{
+        started_at_ms: 1_790_000_100_000,
+        ended_at_ms: 1_790_000_100_120,
+        duration_ms: 120,
+        service_ms: 90,
+        method: "tools/call",
+        tool_name: "read_files",
+        activity_presentation: "Read Runtime source",
+        activity_kind: "exploration",
+        project: "agent:special:webcodex",
+        status: "success",
+        meaningful: true,
+        server_trace_id: "trace-window-workflow-1",
+        workflow_sessions: [{ workflow_session_id: "wc_sess_1111111111111111", project: "agent:special:webcodex", relation: "recording" }],
+      }],
+      activity_returned: 1,
       linked_sessions: [
         {
           workflow_session_id: "wc_sess_1111111111111111",
@@ -162,7 +207,17 @@ describe("Project / Session / Window relationships", () => {
     );
     fireEvent.click(screen.getByRole("tab", { name: /Window Activity/ }));
 
-    expect(await screen.findByText("Runtime E2E hardening")).toBeTruthy();
+    expect(await screen.findByText("Read Runtime source")).toBeTruthy();
+    expect(screen.getByTestId("window-project-tag").textContent).toBe("WebCodex");
+    const workflowStep = screen.getByText("Read Runtime source").closest("details") as HTMLDetailsElement;
+    expect(workflowStep.open).toBe(false);
+    fireEvent.click(screen.getByText("Read Runtime source").closest("summary")!);
+    expect(workflowStep.open).toBe(true);
+    expect(screen.getByText("tools/call")).toBeTruthy();
+    expect(screen.getByText(/recording · wc_sess_/)).toBeTruthy();
+
+    fireEvent.click(screen.getByText("Linked Sessions").closest("summary")!);
+    expect(screen.getByText("Runtime E2E hardening")).toBeTruthy();
     expect(screen.getByText("WebUI v2 rewrite")).toBeTruthy();
     expect(screen.getByText("recording")).toBeTruthy();
     expect(screen.getByText("work_on_project")).toBeTruthy();
@@ -229,6 +284,7 @@ describe("Project / Session / Window relationships", () => {
       onUnauthorized: vi.fn(),
     };
     const rendered = render(<WorkView {...props} />);
+    expect(await screen.findByText("/root/git/webcodex")).toBeTruthy();
     fireEvent.click(await screen.findByRole("tab", { name: "Evidence" }));
     expect(await screen.findByText(/Window 1111111111/)).toBeTruthy();
     expect(screen.getByText(/Window 2222222222/)).toBeTruthy();
@@ -278,7 +334,7 @@ describe("Project / Session / Window relationships", () => {
       status: "ok",
       meaningful: true,
       workflow_sessions: [],
-    }));
+    })).reverse();
     const client = fakeClient((path) => {
       if (path === "windows") return ok({
         windows: [{ client_window_key: key, source: "openai-session", last_seen_at_ms: 1_790_000_000_000, active_count: 0, linked_session_count: 0, recorder_gap_count: 0 }],
@@ -310,12 +366,18 @@ describe("Project / Session / Window relationships", () => {
       />,
     );
     fireEvent.click(screen.getByRole("tab", { name: /Window Activity/ }));
-    expect(await screen.findByText("tool-204")).toBeTruthy();
-    expect(screen.queryByText("tool-0")).toBeNull();
+    expect((await screen.findAllByText("tool-204")).length).toBeGreaterThan(0);
+    expect(screen.queryAllByText("tool-0")).toHaveLength(0);
+    let steps = screen.getAllByTestId("window-workflow-step");
+    expect(steps[0].textContent).toContain("tool-5");
+    expect(steps.at(-1)?.textContent).toContain("tool-204");
     const more = screen.getByRole("button", { name: /Show more activity/ });
     expect(more.textContent).toContain("5 remaining");
     fireEvent.click(more);
-    expect(screen.getByText("tool-0")).toBeTruthy();
+    expect(screen.getAllByText("tool-0").length).toBeGreaterThan(0);
+    steps = screen.getAllByTestId("window-workflow-step");
+    expect(steps[0].textContent).toContain("tool-0");
+    expect(steps.at(-1)?.textContent).toContain("tool-204");
     expect(screen.getByText("Server activity history is bounded; older Window activity is not loaded.")).toBeTruthy();
   });
 

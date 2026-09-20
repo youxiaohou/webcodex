@@ -49,7 +49,9 @@ export function attentionCount(attention: AttentionOverview): number {
 }
 
 export function workBucket(session: SessionListItem): WorkBucket {
-  if (session.running_call || session.running_jobs > 0) return "running";
+  // Only Runner-owned Jobs are authoritative live execution here. An unfinished
+  // Session call is retained ledger evidence and can outlive the originating Window.
+  if (session.running_jobs > 0) return "running";
   if (attentionCount(session.overview.attention) > 0) return "attention";
   return session.lifecycle === "active" ? "active" : "recent";
 }
@@ -60,10 +62,6 @@ function boundedText(value: string | undefined, max = 140): string {
 }
 
 export function phaseFromSession(session: SessionListItem): string {
-  const current = session.current_activity;
-  if (session.running_call && current) {
-    return boundedText(current.summary) || current.tool || current.kind || "Working";
-  }
   if (session.running_jobs > 0) {
     return session.running_jobs === 1 ? "1 running Job" : `${session.running_jobs} running Jobs`;
   }
@@ -140,7 +138,7 @@ export function groupRecentProgress(detail: SessionDetail | null, limit = 80): P
   for (const activity of bounded) {
     const intent = intentForActivity(activity);
     const latestAt = activity.finished_at ?? activity.started_at;
-    const tools = [activity.tool, ...activity.group_tools].filter((value): value is string => Boolean(value));
+    const tools = [activity.tool, ...(activity.group_tools || [])].filter((value): value is string => Boolean(value));
     const paths = activity.paths || [];
     const previous = groups.at(-1);
     if (previous && previous.intent === intent && previous.state === activity.state) {
@@ -162,15 +160,14 @@ export function groupRecentProgress(detail: SessionDetail | null, limit = 80): P
       state: activity.state,
     });
   }
-  return groups.reverse().slice(0, 12);
+  // Keep the newest bounded groups, but render them chronologically so the
+  // workflow reads top-to-bottom from older evidence toward the latest action.
+  return groups.slice(-12);
 }
 
 export function selectedWorkFromDetail(item: WorkItem, detail: SessionDetail | null): WorkItem {
   if (!detail) return item;
-  const detailPhase = phaseFromSession(detail);
-  const phase = detail.running_call && !detail.current_activity && item.currentActivity
-    ? item.phase
-    : detailPhase;
+  const phase = phaseFromSession(detail);
   return {
     ...item,
     title: detail.title,
