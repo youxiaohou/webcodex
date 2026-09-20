@@ -21,6 +21,7 @@ use webcodex_workspace::file_read_range::EffectiveRange;
 const MAX_SNAPSHOTS: usize = 64;
 const MAX_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_FLIGHTS: usize = 128;
+const PHYSICAL_READ_GRACE: Duration = Duration::from_secs(2);
 
 tokio::task_local! {
     // Installed only after the canonical dispatcher has authorized the call.
@@ -78,6 +79,11 @@ struct ReadKey {
 
 type ReadFlight = Shared<BoxFuture<'static, Arc<ToolResult>>>;
 
+struct ReadFlightEntry {
+    physical_deadline: Instant,
+    flight: WeakShared<BoxFuture<'static, Arc<ToolResult>>>,
+}
+
 struct Snapshot {
     key: SnapshotKey,
     output: Value,
@@ -88,7 +94,7 @@ struct Snapshot {
 struct State {
     snapshots: VecDeque<Snapshot>,
     bytes: usize,
-    flights: HashMap<ReadKey, WeakShared<BoxFuture<'static, Arc<ToolResult>>>>,
+    flights: HashMap<ReadKey, ReadFlightEntry>,
 }
 
 #[derive(Default)]
@@ -163,26 +169,45 @@ impl ReadCache {
         state.snapshots.push_back(Snapshot { key, output, bytes });
     }
 
-    fn flight(&self, key: ReadKey, work: BoxFuture<'static, ToolResult>) -> ReadFlight {
+    fn flight(
+        &self,
+        key: ReadKey,
+        caller_deadline: Instant,
+        physical_deadline: Instant,
+        work: BoxFuture<'static, ToolResult>,
+    ) -> ReadFlight {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         // Weak ownership: the last departing waiter drops the physical future.
         // Completed successes AND errors must never become unfenced cache hits.
-        state
-            .flights
-            .retain(|_, weak| weak.upgrade().is_some_and(|f| f.peek().is_none()));
+        state.flights.retain(|_, entry| {
+            entry
+                .flight
+                .upgrade()
+                .is_some_and(|flight| flight.peek().is_none())
+        });
         if let Some(existing) = state
             .flights
             .get(&key)
-            .and_then(WeakShared::upgrade)
+            // Sharing is only an optimization: a late waiter may join an older
+            // flight only when that flight is guaranteed to live through the
+            // waiter's own caller deadline.
+            .filter(|entry| caller_deadline <= entry.physical_deadline)
+            .and_then(|entry| entry.flight.upgrade())
             .filter(|flight| flight.peek().is_none())
         {
             return existing;
         }
         let flight = work.map(Arc::new).boxed().shared();
-        if state.flights.len() < MAX_FLIGHTS {
-            state
-                .flights
-                .insert(key, flight.downgrade().expect("new flight"));
+        // Replacing an older same-key flight does not increase the bounded index.
+        // The displaced flight remains alive only through its existing waiters.
+        if state.flights.contains_key(&key) || state.flights.len() < MAX_FLIGHTS {
+            state.flights.insert(
+                key,
+                ReadFlightEntry {
+                    physical_deadline,
+                    flight: flight.downgrade().expect("new flight"),
+                },
+            );
         }
         flight
     }
@@ -234,6 +259,9 @@ impl ToolRuntime {
             limit: range.limit,
             expected_sha256: expected_sha256.map(str::to_owned),
         };
+        // Keep physical work bounded while allowing the starter caller to time
+        // out without immediately tearing down work still safe for another waiter.
+        let physical_deadline = deadline + PHYSICAL_READ_GRACE;
         let runtime = self.clone();
         let project = resolved.config.clone();
         let runner_project_id = runner_project_id.to_owned();
@@ -241,9 +269,6 @@ impl ToolRuntime {
         let work = async move {
             let key = work_key;
             let target = &key.snapshot.target;
-            // Each waiter has its own deadline; one short-lived caller must not
-            // cancel a read still owned by another caller. Work itself is bounded.
-            let physical_deadline = Instant::now() + Duration::from_secs(32);
             let read = |start, limit| {
                 runtime.read_one_resolved_project_file(
                     &project,
@@ -288,7 +313,9 @@ impl ToolRuntime {
             result
         }
         .boxed();
-        let flight = self.read_cache.flight(key, work);
+        let flight = self
+            .read_cache
+            .flight(key, deadline, physical_deadline, work);
         match tokio::time::timeout_at(deadline, flight).await {
             Ok(result) => ToolResult {
                 success: result.success,

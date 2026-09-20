@@ -260,6 +260,129 @@ async fn read_files_singleflight_isolates_authority_and_survives_one_cancelled_w
     assert_eq!(other.await.output["succeeded_count"], 1);
 }
 
+#[tokio::test]
+async fn read_files_singleflight_late_waiter_keeps_its_own_deadline_budget() {
+    let root = tempfile::tempdir().unwrap();
+    let runtime = ToolRuntime::new_for_tests();
+    let client = "read-flight-deadline";
+    register_runner_project_at_path(&runtime, client, "demo", root.path()).await;
+    let resolved = runtime.resolve_project_input("demo").await.unwrap();
+    let runner_instance_id = runtime
+        .runner_registry
+        .get_runner_view(client)
+        .await
+        .unwrap()
+        .runner_instance_id;
+    let runner_project_id = crate::tool_runtime::runner_local_project_id(&resolved.resolved_id)
+        .unwrap()
+        .to_string();
+    let scope = super::super::read_cache::ReadScope::new(None, Some("session-a"));
+    let base = tokio::time::Instant::now();
+    let first_deadline = base + Duration::from_secs(5);
+    let first = super::super::read_cache::READ_SCOPE.scope(
+        scope.clone(),
+        runtime.read_project_snapshot(
+            &resolved,
+            &runner_project_id,
+            &runner_instance_id,
+            "a.rs".into(),
+            Some(1),
+            Some(2),
+            None,
+            first_deadline,
+        ),
+    );
+    tokio::pin!(first);
+    assert!(futures_util::poll!(&mut first).is_pending());
+    let first_request = next_read_request(&runtime, client).await;
+
+    // This caller's deadline extends beyond the first flight's bounded physical
+    // lifetime, so joining that flight would shorten its original read budget.
+    let second_deadline = base + Duration::from_secs(20);
+    let second = super::super::read_cache::READ_SCOPE.scope(
+        scope,
+        runtime.read_project_snapshot(
+            &resolved,
+            &runner_project_id,
+            &runner_instance_id,
+            "a.rs".into(),
+            Some(1),
+            Some(2),
+            None,
+            second_deadline,
+        ),
+    );
+    tokio::pin!(second);
+    assert!(futures_util::poll!(&mut second).is_pending());
+    let second_request = runtime
+        .runner_registry
+        .poll(RunnerPollRequest {
+            client_id: client.into(),
+            runner_instance_id: runner_instance_id.clone(),
+        })
+        .await
+        .unwrap()
+        .expect("late waiter must bypass a flight that expires before its caller deadline");
+    assert_ne!(first_request.request_id, second_request.request_id);
+    assert_no_pending_read(&runtime, client, &runner_instance_id).await;
+
+    complete_read(&runtime, client, &first_request, "one\ntwo\n").await;
+    complete_read(&runtime, client, &second_request, "one\ntwo\n").await;
+    assert!(first.await.success);
+    assert!(second.await.success);
+}
+
+#[tokio::test]
+async fn read_files_singleflight_last_waiter_drop_cancels_runner_registry_request() {
+    let root = tempfile::tempdir().unwrap();
+    let runtime = ToolRuntime::new_for_tests();
+    let client = "read-flight-cancel";
+    register_runner_project_at_path(&runtime, client, "demo", root.path()).await;
+    let scope = super::super::read_cache::ReadScope::new(None, Some("session-a"));
+    let mut first = Box::pin(scoped_read(
+        &runtime,
+        scope.clone(),
+        vec![item("a.rs", None, Some(2))],
+    ));
+    let mut second = Box::pin(scoped_read(
+        &runtime,
+        scope,
+        vec![item("a.rs", None, Some(2))],
+    ));
+    assert!(futures_util::poll!(&mut first).is_pending());
+    assert!(futures_util::poll!(&mut second).is_pending());
+    let request = next_read_request(&runtime, client).await;
+
+    drop(first);
+    tokio::task::yield_now().await;
+    drop(second);
+    // PendingReadGuard performs async registry cleanup from Drop. Yielding lets
+    // that already-spawned cancellation run without relying on wall-clock sleeps.
+    for _ in 0..3 {
+        tokio::task::yield_now().await;
+    }
+
+    let late = runtime
+        .runner_registry
+        .complete(RunnerResultRequest {
+            client_id: client.into(),
+            runner_instance_id: "inst".into(),
+            request_id: request.request_id,
+            exit_code: Some(0),
+            stdout: Some(canonical_agent_file_read_output("one\ntwo\n", 1)),
+            stderr: Some(String::new()),
+            stdout_truncated: false,
+            stderr_truncated: false,
+            duration_ms: Some(1),
+            error: None,
+        })
+        .await;
+    assert!(
+        late.is_err(),
+        "dropping the last singleflight waiter left an orphan RunnerRegistry request"
+    );
+}
+
 #[test]
 fn read_files_planner_deduplicates_default_ranges_without_extending_union_cap() {
     use super::super::read_files::coalesce_read_files_items;

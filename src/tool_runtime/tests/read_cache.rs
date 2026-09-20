@@ -31,6 +31,20 @@ fn output(content: &str) -> Value {
     webcodex_workspace::file_read_normalize::success_output(&range, false)
 }
 
+fn cached_flight(
+    cache: &ReadCache,
+    key: ReadKey,
+    work: BoxFuture<'static, ToolResult>,
+) -> ReadFlight {
+    let caller_deadline = Instant::now() + Duration::from_secs(30);
+    cache.flight(
+        key,
+        caller_deadline,
+        caller_deadline + PHYSICAL_READ_GRACE,
+        work,
+    )
+}
+
 #[test]
 fn snapshot_contains_only_covered_ranges_and_invalidates_changed_sha() {
     let cache = ReadCache::default();
@@ -114,7 +128,8 @@ async fn singleflight_shares_only_pending_work_and_never_retains_errors() {
     let count = Arc::new(AtomicUsize::new(0));
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
     let calls = count.clone();
-    let mut first = cache.flight(
+    let mut first = cached_flight(
+        &cache,
         key(),
         async move {
             calls.fetch_add(1, Ordering::SeqCst);
@@ -124,13 +139,18 @@ async fn singleflight_shares_only_pending_work_and_never_retains_errors() {
         .boxed(),
     );
     assert!(futures_util::poll!(&mut first).is_pending());
-    let second = cache.flight(key(), async { panic!("duplicate work polled") }.boxed());
+    let second = cached_flight(
+        &cache,
+        key(),
+        async { panic!("duplicate work polled") }.boxed(),
+    );
     let retained_completed_handle = second.clone();
     tx.send(()).unwrap();
     assert!(!first.await.success);
     assert!(!second.await.success);
     assert_eq!(count.load(Ordering::SeqCst), 1);
-    let next = cache.flight(
+    let next = cached_flight(
+        &cache,
         key(),
         async { ToolResult::ok(json!({"fresh": true})) }.boxed(),
     );
@@ -142,7 +162,11 @@ async fn singleflight_shares_only_pending_work_and_never_retains_errors() {
 async fn singleflight_partitions_exact_authority_session_target_and_range() {
     let cache = ReadCache::default();
     let original = key();
-    let _pending = cache.flight(original.clone(), futures_util::future::pending().boxed());
+    let _pending = cached_flight(
+        &cache,
+        original.clone(),
+        futures_util::future::pending().boxed(),
+    );
     for field in 0..11 {
         let mut other = original.clone();
         match field {
@@ -158,7 +182,8 @@ async fn singleflight_partitions_exact_authority_session_target_and_range() {
             9 => other.limit += 1,
             _ => other.expected_sha256 = Some("different-snapshot".into()),
         }
-        let mut independent = cache.flight(other, async { ToolResult::ok(json!({})) }.boxed());
+        let mut independent =
+            cached_flight(&cache, other, async { ToolResult::ok(json!({})) }.boxed());
         assert!(
             futures_util::poll!(&mut independent).is_ready(),
             "field {field} shared work"
@@ -177,7 +202,8 @@ async fn singleflight_drops_work_only_when_last_waiter_leaves_and_bounds_slots()
     let cache = ReadCache::default();
     let drops = Arc::new(AtomicUsize::new(0));
     let guard = Guard(drops.clone());
-    let mut first = cache.flight(
+    let mut first = cached_flight(
+        &cache,
         key(),
         async move {
             let _guard = guard;
@@ -186,7 +212,7 @@ async fn singleflight_drops_work_only_when_last_waiter_leaves_and_bounds_slots()
         .boxed(),
     );
     assert!(futures_util::poll!(&mut first).is_pending());
-    let second = cache.flight(key(), async { panic!("duplicate") }.boxed());
+    let second = cached_flight(&cache, key(), async { panic!("duplicate") }.boxed());
     drop(first);
     assert_eq!(drops.load(Ordering::SeqCst), 0);
     drop(second);
@@ -195,7 +221,11 @@ async fn singleflight_drops_work_only_when_last_waiter_leaves_and_bounds_slots()
     for start in 1..=MAX_FLIGHTS + 2 {
         let mut key = key();
         key.start = start;
-        flights.push(cache.flight(key, futures_util::future::pending().boxed()));
+        flights.push(cached_flight(
+            &cache,
+            key,
+            futures_util::future::pending().boxed(),
+        ));
     }
     assert_eq!(cache.state.lock().unwrap().flights.len(), MAX_FLIGHTS);
 }
