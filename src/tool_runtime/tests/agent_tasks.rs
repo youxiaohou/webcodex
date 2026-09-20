@@ -906,6 +906,99 @@ async fn coding_run_executes_then_reconciles_from_reopened_db_and_fresh_runtime(
 }
 
 #[tokio::test]
+async fn coding_run_accepts_project_alias_when_task_records_canonical_runtime_project() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = Arc::new(
+        crate::db::Database::open(&temp.path().join("agent-task-project-alias.db")).unwrap(),
+    );
+    let runtime = runtime_with_agent_task_db(db);
+    let client_id = "a4a-alias-runner";
+    let instance_id = "a4a-alias-runner-instance";
+    let project_alias = "a4a-alias-project";
+    let auth = auth_context(Some("a4a-alias-owner"), false);
+    let runtime_project_id = register_coding_agent_task_runner(
+        &runtime,
+        client_id,
+        instance_id,
+        "a4a-alias-owner",
+        project_alias,
+        temp.path(),
+        CodingAgentRunInventory::default(),
+    )
+    .await;
+    let agent = runtime.create_agent_identity(
+        Some(&auth),
+        "a4a-alias-agent".to_string(),
+        "A4a Alias Agent".to_string(),
+        None,
+        Vec::new(),
+        "a4a-alias-agent-create".to_string(),
+    );
+    let assignee = agent.output["agent"]["agent_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let created = runtime.create_agent_task(
+        Some(&auth),
+        "Alias project task".to_string(),
+        "Inspect alias resolution".to_string(),
+        Some(assignee.clone()),
+        None,
+        None,
+        Some(runtime_project_id.clone()),
+        "a4a-alias-task-create".to_string(),
+    );
+    let task_id = created.output["task"]["summary"]["task_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let attempt = runtime.start_agent_task_attempt(
+        Some(&auth),
+        task_id.clone(),
+        assignee.clone(),
+        "a4a-alias-attempt".to_string(),
+    );
+    let attempt_id = attempt.output["attempt"]["attempt_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let fence = attempt.output["attempt_fence"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let mut start_task = tokio::spawn({
+        let runtime = runtime.clone();
+        let auth = auth.clone();
+        async move {
+            runtime
+                .start_agent_task_coding_run(
+                    Some(&auth),
+                    project_alias.to_string(),
+                    task_id,
+                    attempt_id,
+                    assignee,
+                    fence,
+                    1,
+                    "codex".to_string(),
+                    None,
+                    Some(300),
+                )
+                .await
+        }
+    });
+    let request = tokio::select! {
+        result = &mut start_task => panic!("alias start returned before Runner dispatch: {:?}", result.unwrap().output),
+        request = wait_for_runner_request_for_instance(&runtime, client_id, instance_id) => request,
+    };
+    let start = match request.coding_agent.as_ref().unwrap() {
+        CodingAgentRequest::Start(start) => start.clone(),
+        other => panic!("expected CodingAgent Start, got {other:?}"),
+    };
+    assert_eq!(start.runtime_project_id, runtime_project_id);
+    start_task.abort();
+}
+
+#[tokio::test]
 async fn delegate_agent_tasks_dispatches_independent_items_and_preserves_input_order() {
     let temp = tempfile::tempdir().unwrap();
     let db = Arc::new(crate::db::Database::open(&temp.path().join("agent-task-batch.db")).unwrap());

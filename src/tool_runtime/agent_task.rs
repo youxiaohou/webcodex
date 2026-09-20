@@ -710,9 +710,25 @@ impl ToolRuntime {
         let Some(db) = self.communication_db.as_ref() else {
             return agent_task_store_unavailable();
         };
+        let task = match db.read_agent_task(&principal, &task_id) {
+            Ok(task) => task,
+            Err(error) => return agent_task_error(error, RecoveryKind::Reconcile),
+        };
+        let Some(referenced_project_id) = task.summary.referenced_project_id.clone() else {
+            return ToolResult::err_with_output(
+                "AgentTask has no referenced_project_id and cannot dispatch a CodingAgentRun",
+                json!({
+                    "error_kind": "agent_task_project_required",
+                    "task_id": task_id,
+                    "attempt_id": attempt_id,
+                    "state_changed": false,
+                }),
+            )
+            .with_recovery(RecoveryKind::FixInput);
+        };
         let context = match db.agent_task_coding_run_start_context(
             &principal,
-            &project,
+            &referenced_project_id,
             &task_id,
             &attempt_id,
             &assignee_agent_id,
@@ -738,7 +754,7 @@ impl ToolRuntime {
             Ok(prepared) => prepared,
             Err(result) => return result,
         };
-        if prepared.runtime_project_id != project {
+        if referenced_project_id != prepared.runtime_project_id {
             return ToolResult::err_with_output(
                 "Resolved CodingAgent Project does not match AgentTask execution intent",
                 json!({
@@ -763,7 +779,7 @@ impl ToolRuntime {
         };
         let prepared_binding = match db.prepare_agent_task_coding_run(
             &principal,
-            &project,
+            &referenced_project_id,
             &task_id,
             &attempt_id,
             &assignee_agent_id,
