@@ -195,6 +195,28 @@ fn coding_run_binding_output_schema() -> Value {
 pub fn output_schema_for_tool(name: &str) -> Option<Value> {
     let schema = match name {
         "create_agent_task" | "assign_agent_task" => task_mutation_schema(),
+        "delegate_agent_tasks" => wrapped_output_schema(vec![
+            ("total_count", schema_type("integer", "Number of requested delegation items.")),
+            ("started_count", schema_type("integer", "Items whose canonical CodingAgentRun dispatch path succeeded.")),
+            ("failed_count", schema_type("integer", "Items that failed during create, Attempt start, or CodingAgentRun dispatch.")),
+            ("returned_count", schema_type("integer", "Number of compact per-item results returned.")),
+            ("items", array_schema(json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "index": schema_type("integer", "Zero-based input item index."),
+                    "success": schema_type("boolean", "Whether this item reached a successful CodingAgentRun dispatch result."),
+                    "phase": {"type": "string", "enum": ["create", "attempt", "dispatch"]},
+                    "task_id": nullable_string("Durable AgentTask id once creation succeeds."),
+                    "attempt_id": nullable_string("Durable AgentTaskAttempt id once Attempt start succeeds."),
+                    "run_id": nullable_string("Durable CodingAgentRun id once dispatch succeeds."),
+                    "execution_status": nullable_string("Compact canonical execution status when available."),
+                    "recovery_kind": nullable_string("Bounded recovery classification when an item fails."),
+                    "error_kind": nullable_string("Bounded canonical failure classification when an item fails.")
+                },
+                "required": ["index", "success", "phase", "task_id", "attempt_id", "run_id", "execution_status", "recovery_kind", "error_kind"]
+            }), "Compact per-item delegation results in input order.")),
+        ]),
         "list_agent_tasks" => wrapped_output_schema(vec![
             ("total_count", schema_type("integer", "Total AgentTasks visible to the current owner principal.")),
             ("offset", schema_type("integer", "Returned page offset.")),
@@ -218,6 +240,29 @@ pub fn output_schema_for_tool(name: &str) -> Option<Value> {
         "start_agent_task_coding_run" | "reconcile_agent_task_coding_run" => {
             coding_run_binding_output_schema()
         }
+        "reconcile_agent_tasks" => wrapped_output_schema(vec![
+            ("total_count", schema_type("integer", "Number of requested reconciliation items.")),
+            ("reconciled_count", schema_type("integer", "Items successfully reconciled through the canonical binding path.")),
+            ("failed_count", schema_type("integer", "Items whose canonical reconciliation failed.")),
+            ("returned_count", schema_type("integer", "Number of compact per-item results returned.")),
+            ("items", array_schema(json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "index": schema_type("integer", "Zero-based input item index."),
+                    "success": schema_type("boolean", "Whether canonical reconciliation succeeded."),
+                    "task_id": schema_type("string", "Exact durable AgentTask id."),
+                    "attempt_id": schema_type("string", "Exact durable AgentTaskAttempt id."),
+                    "run_id": nullable_string("Bound CodingAgentRun id when available."),
+                    "execution_status": nullable_string("Compact canonical execution status when available."),
+                    "task_state": nullable_string("Authoritative AgentTask state when available."),
+                    "attempt_state": nullable_string("Authoritative AgentTaskAttempt state when available."),
+                    "recovery_kind": nullable_string("Bounded recovery classification when reconciliation fails."),
+                    "error_kind": nullable_string("Bounded canonical failure classification when reconciliation fails.")
+                },
+                "required": ["index", "success", "task_id", "attempt_id", "run_id", "execution_status", "task_state", "attempt_state", "recovery_kind", "error_kind"]
+            }), "Compact reconciliation results in input order.")),
+        ]),
         "heartbeat_agent_task_attempt" => wrapped_output_schema(vec![
             ("task", task_summary_schema()),
             ("attempt", attempt_schema()),

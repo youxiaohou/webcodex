@@ -149,6 +149,19 @@ fn agent_task_tools_are_definition_owned_and_a4a_adds_execution_authority_explic
         ])
     );
 
+    let delegate = lookup_tool_definition("delegate_agent_tasks").unwrap();
+    assert!(delegate.model_spec.is_some());
+    assert_eq!(delegate.category, "agent_task");
+    assert!(delegate.metadata.requires_project);
+    assert_eq!(
+        delegate.runner_capability,
+        Some(RunnerCapabilityRequirement::CodingAgentRuns)
+    );
+    assert_eq!(delegate.metadata.effect, ToolEffect::Execute);
+    assert_eq!(delegate.metadata.risk, ToolRisk::JobRun);
+    assert_eq!(delegate.metadata.idempotency, ToolIdempotency::Keyed);
+    assert_eq!(delegate.metadata.authority, start_coding.metadata.authority);
+
     let reconcile = lookup_tool_definition("reconcile_agent_task_coding_run").unwrap();
     assert!(reconcile.model_spec.is_some());
     assert_eq!(reconcile.category, "agent_task");
@@ -172,6 +185,21 @@ fn agent_task_tools_are_definition_owned_and_a4a_adds_execution_authority_explic
             SCOPE_COMMUNICATION_MANAGE,
             SCOPE_CODING_AGENT_RUN,
         ])
+    );
+
+    let reconcile_batch = lookup_tool_definition("reconcile_agent_tasks").unwrap();
+    assert!(reconcile_batch.model_spec.is_some());
+    assert_eq!(reconcile_batch.category, "agent_task");
+    assert!(!reconcile_batch.metadata.requires_project);
+    assert_eq!(reconcile_batch.metadata.effect, ToolEffect::Mutate);
+    assert_eq!(reconcile_batch.metadata.risk, ToolRisk::WorkflowManage);
+    assert_eq!(
+        reconcile_batch.metadata.idempotency,
+        ToolIdempotency::DesiredState
+    );
+    assert_eq!(
+        reconcile_batch.metadata.authority,
+        reconcile.metadata.authority
     );
 
     for name in ["list_agent_tasks", "read_agent_task"] {
@@ -316,6 +344,33 @@ fn agent_task_output_schemas_publish_bounded_task_and_attempt_contracts() {
         assert!(output["attempt"]["properties"].get("attempt_id").is_some());
         assert!(output.get("attempt_fence").is_none());
     }
+
+    let delegate = spec("delegate_agent_tasks");
+    let delegate_input = delegate.input_schema["properties"].as_object().unwrap();
+    for required in ["project", "provider_id", "items"] {
+        assert!(delegate_input.contains_key(required));
+    }
+    let delegate_item = &delegate_input["items"]["items"];
+    for required in [
+        "title",
+        "instruction",
+        "assignee_agent_id",
+        "idempotency_key",
+        "attempt_idempotency_key",
+    ] {
+        assert!(delegate_item["properties"].get(required).is_some());
+    }
+    let delegate_output = &delegate.output_schema["properties"]["output"]["properties"];
+    assert!(delegate_output.get("started_count").is_some());
+    assert!(delegate_output.get("items").is_some());
+
+    let reconcile_batch = spec("reconcile_agent_tasks");
+    let reconcile_items = &reconcile_batch.input_schema["properties"]["items"]["items"];
+    assert!(reconcile_items["properties"].get("task_id").is_some());
+    assert!(reconcile_items["properties"].get("attempt_id").is_some());
+    let reconcile_output = &reconcile_batch.output_schema["properties"]["output"]["properties"];
+    assert!(reconcile_output.get("reconciled_count").is_some());
+    assert!(reconcile_output.get("items").is_some());
 
     let coding_start = spec("start_agent_task_coding_run");
     let coding_start_input = coding_start.input_schema["properties"].as_object().unwrap();
@@ -848,6 +903,139 @@ async fn coding_run_executes_then_reconciles_from_reopened_db_and_fresh_runtime(
             .is_none(),
         "restart reconciliation from authoritative inventory must not mint another Start"
     );
+}
+
+#[tokio::test]
+async fn delegate_agent_tasks_dispatches_independent_items_and_preserves_input_order() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = Arc::new(crate::db::Database::open(&temp.path().join("agent-task-batch.db")).unwrap());
+    let runtime = runtime_with_agent_task_db(db);
+    let client_id = "a4a-batch-runner";
+    let instance_id = "a4a-batch-runner-instance";
+    let auth = auth_context(Some("a4a-batch-owner"), false);
+    let project = register_coding_agent_task_runner(
+        &runtime,
+        client_id,
+        instance_id,
+        "a4a-batch-owner",
+        "a4a-batch-project",
+        temp.path(),
+        CodingAgentRunInventory::default(),
+    )
+    .await;
+    let agent_result = runtime.create_agent_identity(
+        Some(&auth),
+        "a4a-batch-agent".to_string(),
+        "A4a Batch Agent".to_string(),
+        None,
+        Vec::new(),
+        "a4a-batch-agent-create".to_string(),
+    );
+    assert!(agent_result.success, "{:?}", agent_result.output);
+    let assignee = agent_result.output["agent"]["agent_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let items = vec![
+        super::super::DelegateAgentTaskItem {
+            title: "Batch first".to_string(),
+            instruction: "First independent batch instruction".to_string(),
+            assignee_agent_id: assignee.clone(),
+            idempotency_key: "batch-create-1".to_string(),
+            attempt_idempotency_key: "batch-attempt-1".to_string(),
+        },
+        super::super::DelegateAgentTaskItem {
+            title: "Batch second".to_string(),
+            instruction: "Second independent batch instruction".to_string(),
+            assignee_agent_id: assignee,
+            idempotency_key: "batch-create-2".to_string(),
+            attempt_idempotency_key: "batch-attempt-2".to_string(),
+        },
+    ];
+    let batch = tokio::spawn({
+        let runtime = runtime.clone();
+        let auth = auth.clone();
+        let project = project.clone();
+        async move {
+            runtime
+                .delegate_agent_tasks(
+                    Some(&auth),
+                    project,
+                    "codex".to_string(),
+                    None,
+                    Some(300),
+                    items,
+                )
+                .await
+        }
+    });
+
+    for expected_instruction in [
+        "First independent batch instruction",
+        "Second independent batch instruction",
+    ] {
+        let request = wait_for_runner_request_for_instance(&runtime, client_id, instance_id).await;
+        let start = match request
+            .coding_agent
+            .as_ref()
+            .expect("typed CodingAgent request")
+        {
+            CodingAgentRequest::Start(start) => start.clone(),
+            other => panic!("expected CodingAgent Start, got {other:?}"),
+        };
+        assert_eq!(start.instruction, expected_instruction);
+        let now = chrono::Utc::now().timestamp();
+        let running = CodingAgentRunSnapshot {
+            run_id: start.run_id.clone(),
+            intent_fingerprint: start.intent_fingerprint.clone(),
+            authority_fingerprint: start.authority_fingerprint.clone(),
+            runtime_project_id: start.runtime_project_id.clone(),
+            provider_id: start.provider_id.clone(),
+            provider_instance_id: start.provider_instance_id.clone(),
+            state: CodingAgentRunState::Running,
+            execution_state: CodingAgentExecutionState::Started,
+            observation_revision: 1,
+            created_at: now,
+            updated_at: now,
+            terminal: None,
+        };
+        runtime
+            .runner_registry
+            .complete(RunnerResultPayload {
+                result: RunnerResultRequest {
+                    client_id: client_id.to_string(),
+                    runner_instance_id: instance_id.to_string(),
+                    request_id: request.request_id,
+                    exit_code: None,
+                    stdout: None,
+                    stderr: None,
+                    stdout_truncated: false,
+                    stderr_truncated: false,
+                    duration_ms: None,
+                    error: None,
+                },
+                command_execution_state: None,
+                mcp_gateway: None,
+                plugin_gateway: None,
+                coding_agent: Some(CodingAgentResponse::success(
+                    CodingAgentResponsePayload::Start { run: running },
+                )),
+            })
+            .await
+            .unwrap();
+    }
+
+    let result = batch.await.unwrap();
+    assert!(result.success, "{:?}", result.output);
+    assert_eq!(result.output["total_count"], 2);
+    assert_eq!(result.output["started_count"], 2);
+    assert_eq!(result.output["failed_count"], 0);
+    assert_eq!(result.output["items"][0]["index"], 0);
+    assert_eq!(result.output["items"][1]["index"], 1);
+    assert_eq!(result.output["items"][0]["success"], true);
+    assert_eq!(result.output["items"][1]["success"], true);
+    assert!(result.output["items"][0]["run_id"].as_str().is_some());
+    assert!(result.output["items"][1]["run_id"].as_str().is_some());
 }
 
 #[test]

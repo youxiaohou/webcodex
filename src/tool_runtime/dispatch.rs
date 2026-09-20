@@ -2546,6 +2546,24 @@ impl ToolRuntime {
                 idempotency_key,
             ),
 
+            ToolCall::DelegateAgentTasks {
+                project,
+                provider_id,
+                config,
+                timeout_secs,
+                items,
+            } => {
+                Box::pin(self.delegate_agent_tasks(
+                    auth,
+                    project,
+                    provider_id,
+                    config,
+                    timeout_secs,
+                    items,
+                ))
+                .await
+            }
+
             ToolCall::ListAgentTasks {
                 assignee_agent_id,
                 offset,
@@ -2606,6 +2624,10 @@ impl ToolRuntime {
                     timeout_secs,
                 ))
                 .await
+            }
+
+            ToolCall::ReconcileAgentTasks { items } => {
+                Box::pin(self.reconcile_agent_tasks(auth, items)).await
             }
 
             ToolCall::ReconcileAgentTaskCodingRun {

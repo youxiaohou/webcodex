@@ -69,12 +69,14 @@ pub const TOOL_DISCOVERY_GROUPS: &[ToolDiscoveryGroup] = &[
         name: TOOL_DISCOVERY_GROUP_AGENT_TASK,
         tools: &[
             "create_agent_task",
+            "delegate_agent_tasks",
             "list_agent_tasks",
             "read_agent_task",
             "assign_agent_task",
             "start_agent_task_attempt",
             "start_agent_task_endpoint_continuation",
             "start_agent_task_coding_run",
+            "reconcile_agent_tasks",
             "reconcile_agent_task_coding_run",
             "heartbeat_agent_task_attempt",
             "complete_agent_task_attempt",
@@ -383,6 +385,17 @@ pub const TOOL_RECOMMENDED_FLOWS: &[ToolRecommendedFlow] = &[
             "get_goal",
             "read_agent_task",
             "update_goal",
+        ],
+    },
+    ToolRecommendedFlow {
+        name: "coding_agent_batch_orchestration",
+        summary: "Batch CodingAgent orchestration: delegate up to eight independent AgentTasks, observe their returned CodingAgentRuns with bounded waits, then batch-reconcile authoritative Task terminal truth.",
+        manifest_purpose: "For independent parallel coding/review/test work on one Project, call delegate_agent_tasks once with explicit assignees and replay keys. Observe returned run_ids with coding_agent_observe using its bounded wait and opaque observation token, then call reconcile_agent_tasks with the returned task_id/attempt_id pairs after relevant Runs become terminal. This facade never creates a second scheduler, TaskGroup, Wait domain, or recursive Agent hierarchy; canonical AgentTask, Attempt, CodingAgentRun, authority and recovery semantics remain authoritative.",
+        tools: &[
+            "delegate_agent_tasks",
+            "coding_agent_observe",
+            "reconcile_agent_tasks",
+            "read_agent_task",
         ],
     },
     ToolRecommendedFlow {

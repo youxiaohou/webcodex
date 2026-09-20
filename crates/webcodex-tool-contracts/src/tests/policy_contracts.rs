@@ -598,6 +598,11 @@ fn required_runner_capability_matches_metadata_risk_table() {
             RunnerCapabilityRequirement::CodingAgentRuns,
         ),
         (
+            "delegate_agent_tasks",
+            ToolRisk::JobRun,
+            RunnerCapabilityRequirement::CodingAgentRuns,
+        ),
+        (
             "run_shell",
             ToolRisk::JobRun,
             RunnerCapabilityRequirement::Shell,

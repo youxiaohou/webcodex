@@ -140,9 +140,10 @@ pub(crate) use tool_definition::{
     RunnerCapabilityRequirement,
 };
 pub use webcodex_tool_contracts::tool_call::{
-    AgentWaitEventSelectorCall, AgentWaitModeCall, HostFileImportProvenance, ObserveJobsItem,
-    ObserveJobsWakeOn, PluginToolCall, ProjectArtifactAction, ReadFilesItem, SearchPatternMode,
-    SearchProjectTextsQuery, SearchResultMode, SshResourceToolCall, ToolCall,
+    AgentWaitEventSelectorCall, AgentWaitModeCall, DelegateAgentTaskItem, HostFileImportProvenance,
+    ObserveJobsItem, ObserveJobsWakeOn, PluginToolCall, ProjectArtifactAction, ReadFilesItem,
+    ReconcileAgentTaskItem, SearchPatternMode, SearchProjectTextsQuery, SearchResultMode,
+    SshResourceToolCall, ToolCall,
 };
 pub(crate) use webcodex_tool_contracts::tool_call::{TOOL_CALL_PARAMS_FIELD, TOOL_CALL_TOOL_FIELD};
 #[cfg(test)]

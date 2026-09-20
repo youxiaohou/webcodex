@@ -4456,6 +4456,21 @@ impl ToolCallAuditProjection for ToolCall {
                     "idempotency_key": idempotency_key,
                 }),
             ),
+            Self::DelegateAgentTasks {
+                project,
+                provider_id,
+                config,
+                timeout_secs,
+                items,
+            } => serde_json::json!({
+                "project": project,
+                "provider_id": provider_id,
+                "config_present": config.is_some(),
+                "timeout_secs": timeout_secs,
+                "item_count": items.len(),
+                "instruction_bytes": items.iter().map(|item| item.instruction.len()).sum::<usize>(),
+                "idempotency_keys_present": items.iter().all(|item| !item.idempotency_key.is_empty() && !item.attempt_idempotency_key.is_empty()),
+            }),
             Self::ListAgentTasks {
                 assignee_agent_id,
                 offset,
@@ -4534,6 +4549,9 @@ impl ToolCallAuditProjection for ToolCall {
                     "timeout_secs": timeout_secs,
                 }),
             ),
+            Self::ReconcileAgentTasks { items } => serde_json::json!({
+                "item_count": items.len(),
+            }),
             Self::ReconcileAgentTaskCodingRun {
                 task_id,
                 attempt_id,

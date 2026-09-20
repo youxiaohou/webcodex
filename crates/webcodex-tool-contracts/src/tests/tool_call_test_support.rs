@@ -44,6 +44,27 @@ fn sample_tool_args_for_spec(spec: &ToolSpec) -> Value {
         "observe_jobs" => {
             args.insert("items".to_string(), json!([{"job_id": "job_123"}]));
         }
+        "delegate_agent_tasks" => {
+            args.insert(
+                "items".to_string(),
+                json!([{
+                    "title": "Delegated work",
+                    "instruction": "Implement the delegated change",
+                    "assignee_agent_id": "wc_dagent_qqqqqqqqqqqqqqqq",
+                    "idempotency_key": "delegate-create-1",
+                    "attempt_idempotency_key": "delegate-attempt-1"
+                }]),
+            );
+        }
+        "reconcile_agent_tasks" => {
+            args.insert(
+                "items".to_string(),
+                json!([{
+                    "task_id": "wc_agent_task_ERERERERERERERER",
+                    "attempt_id": "wc_agent_task_attempt_IiIiIiIiIiIiIiIi"
+                }]),
+            );
+        }
         "search_and_read" => {
             args.insert("query".to_string(), json!({"pattern": "fn main"}));
         }

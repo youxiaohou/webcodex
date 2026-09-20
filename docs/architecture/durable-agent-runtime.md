@@ -719,6 +719,14 @@ This first concrete backend proves that Agent Task execution is independent from
 ChatGPT browser windows and that TaskAttempt ownership can survive Server restart and
 backend-response uncertainty.
 
+For bounded independent fan-out, `delegate_agent_tasks` is a thin orchestration facade over the
+same canonical Task creation, fenced Attempt start, and A4a CodingAgentRun dispatch path. It
+accepts at most eight items, preserves per-item replay keys and input order, and leaves provider
+concurrency to the Runner. Callers observe each returned `run_id` through
+`coding_agent_observe`; after relevant Runs become terminal, `reconcile_agent_tasks` batches the
+same authoritative A4a reconciliation used by `reconcile_agent_task_coding_run`. These facades do
+not introduce a TaskGroup, scheduler, recursive Agent hierarchy, or second wait domain.
+
 ### A4b — TaskAttempt -> Agent Endpoint continuation (implemented)
 
 A4b is implemented through `start_agent_task_endpoint_continuation`. The model supplies

@@ -2,7 +2,7 @@ use super::coding_agent::{
     CodingAgentPreparedStart, CodingAgentStartCertainty, CodingAgentStartFailure,
     CodingAgentTypedStartOutcome,
 };
-use super::{RecoveryKind, ToolResult, ToolRuntime};
+use super::{DelegateAgentTaskItem, RecoveryKind, ToolResult, ToolRuntime};
 use crate::auth::AuthContext;
 use crate::db::{
     AgentTaskCodingRunBindingIntent, AgentTaskCodingRunBindingRecord,
@@ -10,6 +10,7 @@ use crate::db::{
     CommunicationStoreError, NewAgentTask, MAX_AGENT_TASK_LIST_LIMIT,
     MAX_AGENT_TASK_TERMINAL_TEXT_BYTES,
 };
+use futures_util::future::join_all;
 use serde::Serialize;
 use serde_json::{json, to_value, Value};
 use sha2::{Digest, Sha256};
@@ -328,6 +329,45 @@ fn coding_run_terminal_reason(run: &CodingAgentRunSnapshot) -> String {
     truncate_utf8_bytes(&reason, MAX_AGENT_TASK_TERMINAL_TEXT_BYTES)
 }
 
+fn delegate_agent_task_failure(
+    index: usize,
+    phase: &'static str,
+    task_id: Option<&str>,
+    attempt_id: Option<&str>,
+    result: &ToolResult,
+) -> Value {
+    json!({
+        "index": index,
+        "success": false,
+        "phase": phase,
+        "task_id": task_id,
+        "attempt_id": attempt_id,
+        "run_id": result.output.get("run_id").cloned().unwrap_or(Value::Null),
+        "execution_status": result.output.get("execution_status").cloned().unwrap_or(Value::Null),
+        "recovery_kind": result.output.get("recovery_kind").cloned().unwrap_or(Value::Null),
+        "error_kind": result.output.get("error_kind").cloned().unwrap_or(Value::Null),
+    })
+}
+
+fn delegate_agent_task_invalid_result(
+    index: usize,
+    phase: &'static str,
+    task_id: Option<&str>,
+    attempt_id: Option<&str>,
+) -> Value {
+    json!({
+        "index": index,
+        "success": false,
+        "phase": phase,
+        "task_id": task_id,
+        "attempt_id": attempt_id,
+        "run_id": Value::Null,
+        "execution_status": Value::Null,
+        "recovery_kind": "reconcile",
+        "error_kind": "invalid_agent_task_orchestration_result",
+    })
+}
+
 impl ToolRuntime {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn create_agent_task(
@@ -363,6 +403,160 @@ impl ToolRuntime {
             Ok(result) => serialized_task_success(result),
             Err(error) => agent_task_error(error, RecoveryKind::RetrySame),
         }
+    }
+
+    pub(crate) async fn delegate_agent_tasks(
+        &self,
+        auth: Option<&AuthContext>,
+        project: String,
+        provider_id: String,
+        config: Option<BTreeMap<String, CodingAgentConfigValue>>,
+        timeout_secs: Option<u64>,
+        items: Vec<DelegateAgentTaskItem>,
+    ) -> ToolResult {
+        let mut completed = Vec::with_capacity(items.len());
+        let mut prepared = Vec::with_capacity(items.len());
+
+        for (index, item) in items.into_iter().enumerate() {
+            let created = self.create_agent_task(
+                auth,
+                item.title,
+                item.instruction,
+                Some(item.assignee_agent_id.clone()),
+                None,
+                None,
+                Some(project.clone()),
+                item.idempotency_key,
+            );
+            if !created.success {
+                completed.push(delegate_agent_task_failure(
+                    index, "create", None, None, &created,
+                ));
+                continue;
+            }
+            let Some(task_id) = created
+                .output
+                .pointer("/task/summary/task_id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+            else {
+                completed.push(delegate_agent_task_invalid_result(
+                    index, "create", None, None,
+                ));
+                continue;
+            };
+
+            let attempt = self.start_agent_task_attempt(
+                auth,
+                task_id.clone(),
+                item.assignee_agent_id.clone(),
+                item.attempt_idempotency_key,
+            );
+            if !attempt.success {
+                completed.push(delegate_agent_task_failure(
+                    index,
+                    "attempt",
+                    Some(&task_id),
+                    None,
+                    &attempt,
+                ));
+                continue;
+            }
+            let attempt_id = attempt
+                .output
+                .pointer("/attempt/attempt_id")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let attempt_fence = attempt
+                .output
+                .get("attempt_fence")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let controller_generation = attempt
+                .output
+                .pointer("/attempt/attempt_controller_generation")
+                .and_then(Value::as_i64);
+            let (Some(attempt_id), Some(attempt_fence), Some(controller_generation)) =
+                (attempt_id, attempt_fence, controller_generation)
+            else {
+                completed.push(delegate_agent_task_invalid_result(
+                    index,
+                    "attempt",
+                    Some(&task_id),
+                    None,
+                ));
+                continue;
+            };
+            prepared.push((
+                index,
+                task_id,
+                attempt_id,
+                item.assignee_agent_id,
+                attempt_fence,
+                controller_generation,
+            ));
+        }
+
+        let dispatched = join_all(prepared.into_iter().map(
+            |(index, task_id, attempt_id, assignee_agent_id, attempt_fence, generation)| {
+                let project = project.clone();
+                let provider_id = provider_id.clone();
+                let config = config.clone();
+                async move {
+                    let result = self
+                        .start_agent_task_coding_run(
+                            auth,
+                            project,
+                            task_id.clone(),
+                            attempt_id.clone(),
+                            assignee_agent_id,
+                            attempt_fence,
+                            generation,
+                            provider_id,
+                            config,
+                            timeout_secs,
+                        )
+                        .await;
+                    if result.success {
+                        json!({
+                            "index": index,
+                            "success": true,
+                            "phase": "dispatch",
+                            "task_id": task_id,
+                            "attempt_id": attempt_id,
+                            "run_id": result.output.get("run_id").cloned().unwrap_or(Value::Null),
+                            "execution_status": result.output.get("execution_status").cloned().unwrap_or(Value::Null),
+                            "recovery_kind": Value::Null,
+                            "error_kind": Value::Null,
+                        })
+                    } else {
+                        delegate_agent_task_failure(
+                            index,
+                            "dispatch",
+                            Some(&task_id),
+                            Some(&attempt_id),
+                            &result,
+                        )
+                    }
+                }
+            },
+        ))
+        .await;
+        completed.extend(dispatched);
+        completed.sort_by_key(|item| item["index"].as_u64().unwrap_or(u64::MAX));
+        let started_count = completed
+            .iter()
+            .filter(|item| item["success"].as_bool() == Some(true))
+            .count();
+        let total_count = completed.len();
+
+        ToolResult::ok(json!({
+            "total_count": total_count,
+            "started_count": started_count,
+            "failed_count": total_count.saturating_sub(started_count),
+            "returned_count": total_count,
+            "items": completed,
+        }))
     }
 
     pub(crate) fn list_agent_tasks(
@@ -635,6 +829,45 @@ impl ToolRuntime {
                 coding_run_failure_result(&task_id, &attempt_id, failure)
             }
         }
+    }
+
+    pub(crate) async fn reconcile_agent_tasks(
+        &self,
+        auth: Option<&AuthContext>,
+        items: Vec<super::ReconcileAgentTaskItem>,
+    ) -> ToolResult {
+        let reconciled = join_all(items.into_iter().enumerate().map(|(index, item)| async move {
+            let task_id = item.task_id;
+            let attempt_id = item.attempt_id;
+            let result = self
+                .reconcile_agent_task_coding_run(auth, task_id.clone(), attempt_id.clone())
+                .await;
+            json!({
+                "index": index,
+                "success": result.success,
+                "task_id": task_id,
+                "attempt_id": attempt_id,
+                "run_id": result.output.get("run_id").cloned().unwrap_or(Value::Null),
+                "execution_status": result.output.get("execution_status").cloned().unwrap_or(Value::Null),
+                "task_state": result.output.get("task_state").cloned().unwrap_or(Value::Null),
+                "attempt_state": result.output.get("attempt_state").cloned().unwrap_or(Value::Null),
+                "recovery_kind": result.output.get("recovery_kind").cloned().unwrap_or(Value::Null),
+                "error_kind": result.output.get("error_kind").cloned().unwrap_or(Value::Null),
+            })
+        }))
+        .await;
+        let reconciled_count = reconciled
+            .iter()
+            .filter(|item| item["success"].as_bool() == Some(true))
+            .count();
+        let total_count = reconciled.len();
+        ToolResult::ok(json!({
+            "total_count": total_count,
+            "reconciled_count": reconciled_count,
+            "failed_count": total_count.saturating_sub(reconciled_count),
+            "returned_count": total_count,
+            "items": reconciled,
+        }))
     }
 
     pub(crate) async fn reconcile_agent_task_coding_run(

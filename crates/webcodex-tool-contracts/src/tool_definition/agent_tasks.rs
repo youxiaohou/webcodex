@@ -47,6 +47,45 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
         ),
         COMMUNICATION_MANAGE_SCOPES,
     ),
+    permission_risk(
+        model_spec(
+            require_all_scopes(
+                def(
+                    "delegate_agent_tasks",
+                    super::ToolAuditPolicy::typed_fields(&[
+                        super::ToolAuditResultField::value("total_count"),
+                        super::ToolAuditResultField::value("started_count"),
+                        super::ToolAuditResultField::value("failed_count"),
+                        super::ToolAuditResultField::array_len("returned_count", "items"),
+                    ]),
+                    ModelVisible,
+                    TOOL_CATEGORY_AGENT_TASK,
+                    Some(CodingAgentRuns),
+                    TOOL_PROVIDER_RUNNER,
+                    super::ToolSemanticContract {
+                        effect: super::ToolEffect::Execute,
+                        risk: JobRun,
+                        approval: super::ToolApprovalPolicy::Standard,
+                        idempotency: super::ToolIdempotency::Keyed,
+                    },
+                    Some(CODING_AGENT_RUN),
+                    true,
+                    NoPath,
+                    true,
+                    false,
+                    super::ToolSessionEvidencePolicy::NONE,
+                ),
+                &[
+                    COMMUNICATION_READ,
+                    COMMUNICATION_MANAGE,
+                    CODING_AGENT_RUN,
+                    webcodex_core::authority::SCOPE_PROJECT_WRITE,
+                ],
+            ),
+            "Batch orchestration facade for one to eight independent AgentTasks. Each item reuses canonical keyed Task creation, fenced Attempt start, and CodingAgentRun dispatch; failures are isolated, input order is preserved, and the Runner remains authoritative for provider concurrency. Use coding_agent_observe on returned run_ids for bounded event-driven Run waiting, then reconcile_agent_tasks to commit authoritative terminal Task truth.",
+        ),
+        PERMISSION_RISK_JOB,
+    ),
     require_all_scopes(
         model_spec(
             def(
@@ -276,6 +315,40 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
             "Explicitly dispatch the exact latest unexpired fenced AgentTaskAttempt to its one durable CodingAgentRun backend. The Server derives the backend replay identity from the Attempt and uses AgentTask.instruction; the supplied Project must match referenced_project_id and is independently re-authorized through normal CodingAgent admission. Durable binding and outcome-unknown fencing precede external dispatch, so uncertain retries never mint replacement work.",
         ),
         PERMISSION_RISK_JOB,
+    ),
+    permission_risk(
+        model_spec(
+            require_all_scopes(
+                def(
+                    "reconcile_agent_tasks",
+                    super::ToolAuditPolicy::typed_fields(&[
+                        super::ToolAuditResultField::value("total_count"),
+                        super::ToolAuditResultField::value("reconciled_count"),
+                        super::ToolAuditResultField::value("failed_count"),
+                        super::ToolAuditResultField::array_len("returned_count", "items"),
+                    ]),
+                    ModelVisible,
+                    TOOL_CATEGORY_AGENT_TASK,
+                    None,
+                    TOOL_PROVIDER_RUNNER,
+                    super::ToolSemanticContract {
+                        effect: super::ToolEffect::Mutate,
+                        risk: WorkflowManage,
+                        approval: super::ToolApprovalPolicy::None,
+                        idempotency: super::ToolIdempotency::DesiredState,
+                    },
+                    Some(COMMUNICATION_MANAGE),
+                    false,
+                    NoPath,
+                    true,
+                    false,
+                    super::ToolSessionEvidencePolicy::NONE,
+                ),
+                &[COMMUNICATION_READ, COMMUNICATION_MANAGE, CODING_AGENT_RUN],
+            ),
+            "Batch-reconcile one to eight exact AgentTask CodingAgentRun bindings after coding_agent_observe reports relevant Run progress or terminal state. Each item reuses canonical reconciliation, failures are isolated, and no new execution is started.",
+        ),
+        PERMISSION_RISK_WRITE,
     ),
     permission_risk(
         model_spec(

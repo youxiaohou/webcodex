@@ -352,6 +352,38 @@ pub struct ObserveJobsItem {
     pub after_observation_token: Option<String>,
 }
 
+/// One bounded AgentTask delegation request. The orchestration facade reuses the canonical
+/// AgentTask creation, Attempt ownership, and CodingAgentRun dispatch paths for every item.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DelegateAgentTaskItem {
+    /// Bounded AgentTask title.
+    #[schemars(length(min = 1, max = 200))]
+    pub title: String,
+    /// Bounded durable AgentTask instruction.
+    #[schemars(length(min = 1, max = 8192))]
+    pub instruction: String,
+    /// Explicit durable Agent assignee for this Task.
+    #[schemars(regex(pattern = "^wc_dagent_[A-Za-z0-9_-]{16}$"))]
+    pub assignee_agent_id: String,
+    /// Caller-generated creation replay key for this Task.
+    #[schemars(length(min = 1, max = 128))]
+    pub idempotency_key: String,
+    /// Independent caller-generated Attempt-start replay key.
+    #[schemars(length(min = 1, max = 128))]
+    pub attempt_idempotency_key: String,
+}
+
+/// One exact delegated AgentTaskAttempt to reconcile after batch Job observation.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReconcileAgentTaskItem {
+    #[schemars(regex(pattern = "^wc_agent_task_[A-Za-z0-9_-]{16}$"))]
+    pub task_id: String,
+    #[schemars(regex(pattern = "^wc_agent_task_attempt_[A-Za-z0-9_-]{16}$"))]
+    pub attempt_id: String,
+}
+
 /// Which observable changes may end a bounded batch Job wait early.
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -2981,6 +3013,30 @@ pub enum ToolCall {
         idempotency_key: String,
     },
 
+    /// Create, claim, and dispatch one to eight independent AgentTasks through the existing durable
+    /// AgentTask/Attempt/CodingAgentRun lifecycle. Item failures are isolated and returned in input order.
+    DelegateAgentTasks {
+        /// Exact registered Project used for every delegated CodingAgentRun. Each created AgentTask records
+        /// this as its referenced Project correlation and execution independently re-authorizes Project write.
+        #[schemars(length(min = 1))]
+        project: String,
+        /// Logical Runner-advertised CodingAgent provider used for every delegated item.
+        #[schemars(length(min = 1, max = 64))]
+        provider_id: String,
+        /// Optional shared run-level CodingAgent config.
+        #[serde(default)]
+        config: Option<BTreeMap<String, webcodex_core::coding_agent::CodingAgentConfigValue>>,
+        #[schemars(extend("default" = 300))]
+        /// Shared total CodingAgentRun budget for each delegated item.
+        #[schemars(range(min = 1, max = 3600))]
+        #[serde(default)]
+        timeout_secs: Option<u64>,
+        /// One to eight independent delegation items. Dispatch is bounded by this fixed batch size; the
+        /// Runner remains authoritative for actual provider concurrency.
+        #[schemars(length(min = 1, max = 8))]
+        items: Vec<DelegateAgentTaskItem>,
+    },
+
     /// List durable AgentTasks owned by the current communication principal.
     ListAgentTasks {
         /// Optional assignee filter within Tasks visible to the current owner principal.
@@ -3091,6 +3147,13 @@ pub enum ToolCall {
         #[schemars(range(min = 1, max = 3600))]
         #[serde(default)]
         timeout_secs: Option<u64>,
+    },
+
+    /// Batch-reconcile one to eight already-bound AgentTask CodingAgentRuns after event-driven Job
+    /// observation. Item failures are isolated and results preserve input order.
+    ReconcileAgentTasks {
+        #[schemars(length(min = 1, max = 8))]
+        items: Vec<ReconcileAgentTaskItem>,
     },
 
     /// Reconcile the exact durable CodingAgentRun already bound to one AgentTaskAttempt.
@@ -5210,6 +5273,7 @@ impl ToolCall {
             Self::CancelAgentWait { .. } => "cancel_agent_wait",
             Self::AgentWaitState { .. } => "agent_wait_state",
             Self::CreateAgentTask { .. } => "create_agent_task",
+            Self::DelegateAgentTasks { .. } => "delegate_agent_tasks",
             Self::ListAgentTasks { .. } => "list_agent_tasks",
             Self::ReadAgentTask { .. } => "read_agent_task",
             Self::AssignAgentTask { .. } => "assign_agent_task",
@@ -5218,6 +5282,7 @@ impl ToolCall {
                 "start_agent_task_endpoint_continuation"
             }
             Self::StartAgentTaskCodingRun { .. } => "start_agent_task_coding_run",
+            Self::ReconcileAgentTasks { .. } => "reconcile_agent_tasks",
             Self::ReconcileAgentTaskCodingRun { .. } => "reconcile_agent_task_coding_run",
             Self::HeartbeatAgentTaskAttempt { .. } => "heartbeat_agent_task_attempt",
             Self::CompleteAgentTaskAttempt { .. } => "complete_agent_task_attempt",
@@ -5455,6 +5520,7 @@ impl ToolCall {
             Self::RunProcess { project, .. }
             | Self::RunDetachedProcess { project, .. }
             | Self::CodingAgentStart { project, .. }
+            | Self::DelegateAgentTasks { project, .. }
             | Self::StartAgentTaskCodingRun { project, .. }
             | Self::RunScript { project, .. }
             | Self::RunShell { project, .. }
