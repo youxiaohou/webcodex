@@ -1006,7 +1006,7 @@ async fn delegate_agent_tasks_dispatches_independent_items_and_preserves_input_o
     let client_id = "a4a-batch-runner";
     let instance_id = "a4a-batch-runner-instance";
     let auth = auth_context(Some("a4a-batch-owner"), false);
-    let project = register_coding_agent_task_runner(
+    let _project = register_coding_agent_task_runner(
         &runtime,
         client_id,
         instance_id,
@@ -1048,12 +1048,11 @@ async fn delegate_agent_tasks_dispatches_independent_items_and_preserves_input_o
     let batch = tokio::spawn({
         let runtime = runtime.clone();
         let auth = auth.clone();
-        let project = project.clone();
         async move {
             runtime
                 .delegate_agent_tasks(
                     Some(&auth),
-                    project,
+                    "a4a-batch-project".to_string(),
                     "codex".to_string(),
                     None,
                     Some(300),

@@ -414,6 +414,10 @@ impl ToolRuntime {
         timeout_secs: Option<u64>,
         items: Vec<DelegateAgentTaskItem>,
     ) -> ToolResult {
+        let resolved_project = match self.resolve_project_input_for_auth(&project, auth).await {
+            Ok(resolved) => resolved.resolved_id,
+            Err(error) => return error.into_tool_result(),
+        };
         let mut completed = Vec::with_capacity(items.len());
         let mut prepared = Vec::with_capacity(items.len());
 
@@ -425,7 +429,7 @@ impl ToolRuntime {
                 Some(item.assignee_agent_id.clone()),
                 None,
                 None,
-                Some(project.clone()),
+                Some(resolved_project.clone()),
                 item.idempotency_key,
             );
             if !created.success {
