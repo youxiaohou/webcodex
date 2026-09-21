@@ -2689,8 +2689,13 @@ impl JobManager {
                         .map(|(key, value)| (key.as_str(), value.as_str())),
                 );
             }
+            // Raw Shell Jobs and every validation step have no stdin payload.
+            // Never inherit the Runner's parent-liveness pipe: it stays open
+            // while Desktop is alive and can stall native commands or let a
+            // child consume input owned by the Runner. Match the sync path.
             command
                 .current_dir(&cwd_path)
+                .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
             commands.push_back(command);

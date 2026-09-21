@@ -5375,3 +5375,168 @@ pub(in crate::webcodex_runner) fn assert_post_spawn_interruption_delta(
     );
     assert!(delta.finished);
 }
+
+#[cfg(feature = "runner-real-process-tests")]
+#[test]
+#[ignore = "real-process stdin isolation: runs an isolated JobManager with parent-only input"]
+fn runner_real_process_shell_job_stdin_isolated() {
+    assert_local_job_stdin_isolated("runner_real_process_shell_job_stdin_isolated", false);
+}
+
+#[cfg(feature = "runner-real-process-tests")]
+#[test]
+#[ignore = "real-process stdin isolation: covers every step of a validation Job"]
+fn runner_real_process_validation_job_stdin_isolated() {
+    assert_local_job_stdin_isolated("runner_real_process_validation_job_stdin_isolated", true);
+}
+
+#[cfg(feature = "runner-real-process-tests")]
+fn assert_local_job_stdin_isolated(test_name: &str, validation: bool) {
+    const FIXTURE_ENV: &str = "WEBCODEX_TEST_JOB_STDIN_FIXTURE";
+    const PARENT_INPUT: &str = "parent-liveness-input-must-not-reach-jobs\n";
+    if std::env::var(FIXTURE_ENV).as_deref() == Ok(test_name) {
+        let root = tempfile::tempdir().unwrap();
+        let mut shell = ShellConfig::default();
+        #[cfg(windows)]
+        let probe =
+            "if ([Console]::In.ReadToEnd().Length -ne 0) { exit 9 }; Write-Output 'JOB_STDIN_EOF'";
+        #[cfg(unix)]
+        let probe = "if IFS= read -r line; then exit 9; fi; printf 'JOB_STDIN_EOF\\n'";
+        let mut request = shell_job_request(root.path(), probe);
+        request.timeout_secs = 5;
+        if validation {
+            let bin = root.path().join("bin");
+            std::fs::create_dir(&bin).unwrap();
+            std::fs::copy(
+                &structured_process_helper().path,
+                bin.join(format!("cargo{}", std::env::consts::EXE_SUFFIX)),
+            )
+            .unwrap();
+            shell.path_prepend.push(bin);
+            let steps = vec![
+                ShellJobValidationStep {
+                    name: "format".into(),
+                    program: "cargo".into(),
+                    args: vec!["fmt".into(), "--".into(), "--check".into()],
+                    env: Vec::new(),
+                },
+                ShellJobValidationStep {
+                    name: "check".into(),
+                    program: "cargo".into(),
+                    args: vec!["check".into(), "--all-targets".into()],
+                    env: Vec::new(),
+                },
+            ];
+            request.kind = "start_validation_job".to_string();
+            request.command = serde_json::to_string(&steps).unwrap();
+            request.job_context = Some(test_job_context(
+                root.path(),
+                vec!["format".into(), "check".into()],
+            ));
+        }
+        let (sink, mut rx) = ws_sink("ws-client");
+        let manager = JobManager::new(1);
+        manager.enqueue(
+            sink,
+            PendingJobStart::from_wire(
+                1,
+                RunnerPolicy {
+                    allow_raw_shell: true,
+                    allow_cwd_anywhere: true,
+                    ..RunnerPolicy::default()
+                },
+                shell,
+                SshConfig::default(),
+                root.path().join("project-registry"),
+                request,
+            ),
+        );
+        let updates = collect_job_updates(&mut rx, Duration::from_secs(10));
+        let terminal = updates.last().expect("Job must emit an update");
+        assert!(
+            terminal.finished,
+            "Job did not reach terminal: {terminal:?}"
+        );
+        assert_eq!(
+            terminal.status, "completed",
+            "Job inherited parent stdin: {terminal:?}"
+        );
+        assert_eq!(
+            terminal.exit_code,
+            Some(0),
+            "Job must receive EOF: {terminal:?}"
+        );
+        if validation {
+            assert_eq!(terminal.validation_progress.as_ref().unwrap().completed, 2);
+        }
+        let stdout = terminal.log_snapshot.as_ref().unwrap().stdout.tail.as_str();
+        assert_eq!(
+            stdout.matches("JOB_STDIN_EOF").count(),
+            if validation { 2 } else { 1 }
+        );
+        let mut remaining = String::new();
+        std::io::stdin().read_to_string(&mut remaining).unwrap();
+        assert_eq!(
+            remaining, PARENT_INPUT,
+            "Jobs must not consume Runner input"
+        );
+        return;
+    }
+
+    // Isolate the inherited input in a subprocess; never replace process-global
+    // stdin in the test runner or depend on an interactive terminal / installed Git.
+    let root = tempfile::tempdir().unwrap();
+    let input = root.path().join("parent-input");
+    std::fs::write(&input, PARENT_INPUT).unwrap();
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .args([
+            "--exact",
+            &format!(
+                "{}::{test_name}",
+                module_path!().split_once("::").unwrap().1
+            ),
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(FIXTURE_ENV, test_name)
+        .stdin(std::fs::File::open(input).unwrap())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = ManagedChild::spawn(&mut command).unwrap();
+    let mut stdout = child.child_mut().stdout.take().unwrap();
+    let mut stderr = child.child_mut().stderr.take().unwrap();
+    let out = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout.read_to_end(&mut bytes).unwrap();
+        bytes
+    });
+    let err = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stderr.read_to_end(&mut bytes).unwrap();
+        bytes
+    });
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            child.terminate_tree().unwrap();
+            break child.wait().unwrap();
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    // Reclaim descendants even after a failed fixture before joining pipe readers.
+    child.terminate_tree().unwrap();
+    let stdout = out.join().unwrap();
+    let stderr = err.join().unwrap();
+    assert!(
+        status.success(),
+        "isolated {test_name} failed:\n{}\n{}",
+        String::from_utf8_lossy(&stdout),
+        String::from_utf8_lossy(&stderr)
+    );
+    assert!(String::from_utf8_lossy(&stdout).contains("1 passed"));
+}
