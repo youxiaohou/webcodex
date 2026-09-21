@@ -3770,6 +3770,13 @@ pub enum ToolCall {
         /// observation.
         #[serde(default)]
         wake_on: ObserveJobsWakeOn,
+        /// Opt-in projection for proven successful structured validation Jobs. Removes routine
+        /// passed-test/progress lines only; preserves diagnostics, lifecycle, counts and log boundaries.
+        /// A returned suggested_call expands retained logs from the original cursor, not the advanced
+        /// observation token. Failures, unknown results and ordinary commands keep their full projection.
+        #[serde(default)]
+        #[schemars(extend("default" = false))]
+        summary_only: bool,
     },
 
     /// Arm one caller-owned durable one-shot terminal attention for an exact

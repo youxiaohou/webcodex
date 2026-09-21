@@ -2356,6 +2356,7 @@ fn observe_jobs_item_limit_matches_presentation_bound() {
         tail_lines: 40,
         wait_secs: None,
         wake_on: Default::default(),
+        summary_only: false,
     };
     assert!(matches!(parsed, ToolCall::ObserveJobs { .. }));
 }

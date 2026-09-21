@@ -1646,6 +1646,7 @@ async fn e3_cargo_test_lib_handoff_arms_terminal_attention_without_polling() {
                 tail_lines: 40,
                 wait_secs: None,
                 wake_on: ObserveJobsWakeOn::Terminal,
+                summary_only: false,
             },
             Some(&auth),
         )

@@ -4069,7 +4069,9 @@ impl ToolCallAuditProjection for ToolCall {
                 tail_lines,
                 wait_secs,
                 wake_on,
+                summary_only,
             } => serde_json::json!({
+                "summary_only": summary_only,
                 "item_count": items.len(),
                 "token_count": items
                     .iter()

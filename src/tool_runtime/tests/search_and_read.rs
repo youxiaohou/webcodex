@@ -1,5 +1,7 @@
 //! Compound inspection must preserve canonical reads without duplicate model output.
 
+mod projection;
+
 use super::super::*;
 use super::support::*;
 use serde_json::{json, Value};

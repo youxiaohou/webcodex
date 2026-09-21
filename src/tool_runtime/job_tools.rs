@@ -48,9 +48,20 @@ impl ToolRuntime {
                 tail_lines,
                 wait_secs,
                 wake_on,
+                summary_only,
             } => {
-                self.observe_jobs_for_auth(items, tail_lines, wait_secs, wake_on, auth)
-                    .await
+                let summary_items = summary_only.then(|| items.clone());
+                let mut result = self
+                    .observe_jobs_for_auth(items, tail_lines, wait_secs, wake_on, auth)
+                    .await;
+                if let Some(items) = summary_items {
+                    super::observe_jobs::summarize_observe_jobs_result(
+                        &mut result,
+                        &items,
+                        tail_lines,
+                    );
+                }
+                result
             }
             ToolCall::WaitForJobTerminal {
                 job_id,

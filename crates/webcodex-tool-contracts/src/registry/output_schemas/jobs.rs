@@ -489,7 +489,7 @@ fn observe_jobs_batch_followup_arguments_schema() -> Value {
 }
 
 fn observe_jobs_output_schema() -> Value {
-    let job_observation = json!({
+    let mut job_observation = json!({
         "type": "object",
         "additionalProperties": true,
         "properties": {
@@ -568,7 +568,7 @@ fn observe_jobs_output_schema() -> Value {
             "activity", "detected_summary", "validation"
         ]
     });
-    let sparse_job_observation = json!({
+    let mut sparse_job_observation = json!({
         "type": "object",
         "additionalProperties": false,
         "properties": {
@@ -629,6 +629,37 @@ fn observe_jobs_output_schema() -> Value {
             "observation_token"
         ]
     });
+    let summary_detail_call = suggested_tool_call_schema(
+        "observe_jobs",
+        json!({
+            "type": "object", "additionalProperties": false,
+            "properties": {
+                "items": {
+                    "type": "array", "minItems": 1, "maxItems": 1,
+                    "items": {
+                        "type": "object", "additionalProperties": false,
+                        "properties": {
+                            "job_id": {"type": "string", "minLength": 1},
+                            "after_observation_token": {"type": "string", "maxLength": webcodex_core::job_observation::MAX_JOB_OBSERVATION_TOKEN_LEN}
+                        },
+                        "required": ["job_id"]
+                    }
+                },
+                "tail_lines": {"type": "integer", "minimum": 1, "maximum": 200},
+                "summary_only": {"type": "boolean", "const": false}
+            },
+            "required": ["items", "tail_lines", "summary_only"]
+        }),
+        "Expand retained logs with the original observation cursor. Logs may have expired; retention/reset evidence remains authoritative. Never re-executes the Job.",
+    );
+    for observation in [&mut job_observation, &mut sparse_job_observation] {
+        observation["properties"]["logs_omitted"] = json!({
+            "type": "array", "minItems": 1, "maxItems": 2, "uniqueItems": true,
+            "items": {"type": "string", "enum": ["stdout", "stderr"]},
+            "description": "Streams with routine successful validation lines omitted by explicit summary_only. Other log text and all diagnostic/state evidence remain unchanged."
+        });
+        observation["properties"]["suggested_call"] = summary_detail_call.clone();
+    }
     let mut item = json!({
         "type": "object",
         "additionalProperties": false,

@@ -250,6 +250,25 @@ The removed ProjectConnector capability names (`task_start`, `files_read`, `edit
 
 ### Long work continues as Jobs
 
+`observe_jobs(summary_only=true)` is an opt-in presentation mode for proven successful
+structured validation Jobs. It removes routine passed-test and Cargo progress lines,
+while preserving test summaries, unknown text, warnings, validation evidence, lifecycle,
+and truncation/reset/retention flags. Failures, zero/unproven tests, compile-only test
+runs, incomplete validation evidence, and ordinary commands keep their normal output.
+Tiny results are unchanged when summary metadata would make them larger.
+
+A summarized item includes `logs_omitted` and a parser-ready `suggested_call` with
+`summary_only=false`. That call preserves the **original** observation cursor; using
+the newly returned observation token instead would skip omitted lines. Expansion is
+bounded by the existing log retention and may report reset or unavailable history.
+No log copy, model invocation, Job execution, permission, or waiting policy is added.
+Omitting `summary_only` preserves the existing behavior.
+
+`search_and_read` reuses ordinary search-result sparsification after read planning.
+It omits redundant phase metadata, not source text, query indexes, failure evidence,
+read revisions, or snapshot-bound continuations.
+
+
 Long-running commands and validations use the canonical WebCodex Job lifecycle. Observe the exact Job returned by the initiating call with `observe_jobs` (or recover it with `list_jobs` when identity was genuinely lost) instead of starting another copy. Jobs are not wrapped as MCP Tasks; WebCodex does not advertise the former Connector-specific MCP Tasks extension.
 
 ## First safe prompt

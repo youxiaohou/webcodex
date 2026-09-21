@@ -631,6 +631,7 @@ async fn run_script_slow_handoff_keeps_typed_payload_ephemeral_and_safe_metadata
                 tail_lines: 40,
                 wait_secs: None,
                 wake_on: Default::default(),
+                summary_only: false,
             },
             Some(&auth),
         )

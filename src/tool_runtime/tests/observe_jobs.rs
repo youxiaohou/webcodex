@@ -1,5 +1,7 @@
 //! Phase D bounded batch Job observation.
 
+mod summary;
+
 use super::super::kernel::{HostFileImportTrust, ToolCallContext, ToolCallRequest, ToolTransport};
 use super::super::*;
 use super::support::*;
@@ -277,6 +279,8 @@ fn observe_jobs_tool_call_enforces_batch_and_scalar_bounds() {
                 tail_lines: 40,
                 wait_secs: None,
                 wake_on: ObserveJobsWakeOn::Change,
+
+                summary_only: false,
                 ..
             }
         ));
@@ -363,6 +367,8 @@ async fn observe_jobs_direct_dispatch_rejects_duplicates_before_observation() {
             tail_lines: 40,
             wait_secs: Some(60),
             wake_on: Default::default(),
+
+            summary_only: false,
         })
         .await;
     assert!(!result.success);
@@ -479,6 +485,8 @@ fn observe_jobs_schema_catalog_permission_and_audit_are_public_and_token_safe() 
         tail_lines: 40,
         wait_secs: Some(5),
         wake_on: Default::default(),
+
+        summary_only: false,
     };
     let summary = call.session_log_arguments();
     assert_eq!(summary["item_count"], 1);
@@ -1009,6 +1017,8 @@ async fn observe_jobs_inaccessible_and_unknown_items_are_indistinguishable() {
                 tail_lines: 40,
                 wait_secs: Some(5),
                 wake_on: Default::default(),
+
+                summary_only: false,
             },
             Some(&auth_b),
         )
@@ -1058,6 +1068,8 @@ async fn observe_jobs_mixed_success_result_matches_declared_output_schema_and_en
                 tail_lines: 40,
                 wait_secs: Some(5),
                 wake_on: ObserveJobsWakeOn::Terminal,
+
+                summary_only: false,
             },
             Some(&auth),
         )
@@ -1102,6 +1114,8 @@ async fn observe_jobs_missing_baseline_is_immediate_and_projects_activity_withou
                 tail_lines: 40,
                 wait_secs: Some(60),
                 wake_on: ObserveJobsWakeOn::Terminal,
+
+                summary_only: false,
             },
             Some(&auth),
         )
@@ -1156,6 +1170,8 @@ async fn observe_jobs_timeout_waits_once_for_multiple_active_jobs() {
                 tail_lines: 40,
                 wait_secs: Some(1),
                 wake_on: Default::default(),
+
+                summary_only: false,
             },
             Some(&auth),
         )
@@ -1218,6 +1234,8 @@ async fn observe_jobs_one_item_update_wakes_shared_wait_and_refreshes_all_snapsh
                     tail_lines: 40,
                     wait_secs: Some(5),
                     wake_on: Default::default(),
+
+                    summary_only: false,
                 },
                 Some(&waiting_auth),
             )
@@ -1283,6 +1301,8 @@ async fn observe_jobs_terminal_transition_wakes_shared_wait() {
                     tail_lines: 40,
                     wait_secs: Some(100),
                     wake_on: ObserveJobsWakeOn::Terminal,
+
+                    summary_only: false,
                 },
                 Some(&waiting_auth),
             )
@@ -1429,6 +1449,8 @@ async fn ordinary_receipts_production_sqlite_dual_restart_observe_and_list_filte
                 tail_lines: 40,
                 wait_secs: Some(30),
                 wake_on: Default::default(),
+
+                summary_only: false,
             },
             Some(&auth),
         )
@@ -1721,6 +1743,8 @@ fn observe_jobs_canonical_continuation_is_parser_ready_with_or_without_baseline(
             ToolCall::ObserveJobs {
                 wait_secs: Some(webcodex_core::runtime_contract::MODEL_JOB_CONTINUATION_WAIT_SECS),
                 wake_on: ObserveJobsWakeOn::Terminal,
+
+                summary_only: false,
                 ..
             }
         ));

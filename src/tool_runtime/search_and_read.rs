@@ -60,6 +60,14 @@ fn sanitize_batch_search_and_collect_successes(batch: &mut Value) -> Vec<Value> 
     successful
 }
 
+/// Reuse the ordinary search projection only after match-derived read planning has consumed
+/// canonical results. Query indexes, failures, truncation and nonempty source context stay intact.
+pub(crate) fn compact_compound_search(batch: Value, default_timeouts: &[bool]) -> Value {
+    let mut result = ToolResult::ok(batch);
+    super::dispatch::sparsify_search_batch_success_for_model(default_timeouts, &mut result);
+    result.output
+}
+
 fn fair_match_read_items(
     searches: &[Value],
     read_before: usize,
@@ -147,6 +155,15 @@ impl ToolRuntime {
         }
 
         let query_count = queries.len();
+        let default_timeouts: Vec<bool> = queries
+            .iter()
+            .map(|query| {
+                query
+                    .timeout_secs
+                    .unwrap_or(super::files::DEFAULT_SEARCH_TIMEOUT_SECS as i64)
+                    == super::files::DEFAULT_SEARCH_TIMEOUT_SECS as i64
+            })
+            .collect();
         let search = self.search_project_texts_resolved(resolved, queries).await;
         if !search.success {
             return search;
@@ -160,13 +177,12 @@ impl ToolRuntime {
             );
         }
         let items = fair_match_read_items(&search_outputs, read_before, read_after, max_reads);
+        let projected_search = compact_compound_search(batch_search_output, &default_timeouts);
         let search_output = if query_count == 1 {
-            search_outputs[0].clone()
+            projected_search["items"][0]["output"].clone()
         } else {
-            // Preserve the canonical batch envelope so callers retain input index,
-            // per-query success/failure, and failure provenance. Read planning still
-            // consumes only successful outputs.
-            batch_search_output
+            // Keep query correspondence and failures; only redundant presentation metadata is removed.
+            projected_search
         };
         if items.is_empty() {
             return ToolResult::ok(json!({
@@ -200,6 +216,14 @@ impl ToolRuntime {
         super::read_files::enforce_final_model_facing_hard_cap(&mut reads, &projection);
         super::read_files::add_actionable_read_continuations(&projection, &mut reads);
         super::dispatch::sparsify_complete_read_success("read_files", &mut reads);
+        // The outer Project already identifies both phases; never remove a distinct identity.
+        if reads.output.get("project").and_then(Value::as_str)
+            == Some(resolved.resolved_id.as_str())
+        {
+            if let Some(output) = reads.output.as_object_mut() {
+                output.remove("project");
+            }
+        }
         ToolResult::ok(json!({
             "project": resolved.resolved_id,
             "search": search_output,

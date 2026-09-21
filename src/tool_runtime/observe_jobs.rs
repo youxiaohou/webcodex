@@ -129,6 +129,150 @@ fn observation_recovery(error_kind: &str) -> RecoveryKind {
     }
 }
 
+/// A presentation-only filter. Unrecognized output, warnings and test summaries stay verbatim.
+/// Partial final lines stay visible because their complete meaning is not yet proven.
+fn compact_validation_log(text: &str, tool: &str, stream: &str) -> String {
+    text.split_inclusive('\n')
+        .filter(|line| {
+            if !line.ends_with('\n') {
+                return true;
+            }
+            let trimmed = line.trim_end_matches(['\r', '\n']);
+            let passed_test = stream == "stdout"
+                && tool == "cargo_test"
+                && trimmed.starts_with("test ")
+                && trimmed.ends_with(" ... ok");
+            let cargo_progress = stream == "stderr"
+                && tool.starts_with("cargo_")
+                && [
+                    "   Compiling ",
+                    "    Checking ",
+                    "    Finished ",
+                    "     Running ",
+                ]
+                .iter()
+                .any(|prefix| line.starts_with(prefix));
+            !(passed_test || cargo_progress)
+        })
+        .collect()
+}
+
+fn successful_validation_for_summary(output: &Value) -> Option<&str> {
+    if output["status"] != "completed"
+        || output["terminal"] != true
+        || output["exit_code"].as_i64() != Some(0)
+        // Structured validation Jobs may omit this supplementary process field.
+        // Canonical terminal status, exit code and validation evidence below prove success;
+        // an explicit contradictory or unknown process state still fails closed.
+        || output.get("command_execution_state").is_some_and(|state| {
+            !state.is_null() && state.as_str() != Some("completed")
+        })
+        || ["recovery_state", "recovery_reason_code"]
+            .iter()
+            .any(|key| output.get(*key).is_some_and(|value| !value.is_null()))
+    {
+        return None;
+    }
+    let validation = output.get("validation")?;
+    let tool = validation.get("tool")?.as_str()?;
+    if !matches!(tool, "cargo_test" | "cargo_check" | "cargo_fmt" | "go_test")
+        || validation["state"] != "completed"
+        || validation["passed"] != true
+        || validation["truncated"] != false
+        || validation["no_run"] == true
+        || validation
+            .get("test_count_assertion")
+            .is_some_and(|assertion| !assertion.is_null() && assertion["status"] != "passed")
+    {
+        return None;
+    }
+    if matches!(tool, "cargo_test" | "go_test")
+        && (validation["tests_detected"] != true
+            || !validation["tests_run_count"]
+                .as_u64()
+                .is_some_and(|count| count > 0)
+            || validation["zero_tests_run"] != false
+            || validation["tests_failed"].as_u64() != Some(0))
+    {
+        return None;
+    }
+    if tool == "cargo_check" && validation["errors_count"].as_u64() != Some(0) {
+        return None;
+    }
+    Some(tool)
+}
+
+/// Keeps canonical Job storage and observation cursors unchanged. Detail recovery deliberately
+/// repeats the caller's original selection, so an advanced token cannot skip omitted log lines.
+/// Apply after canonical observation/packing; never retry, wait, authorize or mutate a Job here.
+pub(crate) fn summarize_observe_jobs_result(
+    result: &mut ToolResult,
+    originals: &[ObserveJobsItem],
+    tail_lines: usize,
+) {
+    if !result.success {
+        return;
+    }
+    let tail_lines = tail_lines.clamp(1, MAX_OBSERVE_JOBS_TAIL_LINES);
+    let Some(items) = result.output.get_mut("items").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for item in items {
+        if item["success"] != true {
+            continue;
+        }
+        let Some(original) = item["index"]
+            .as_u64()
+            .and_then(|index| originals.get(index as usize))
+        else {
+            continue;
+        };
+        if item["job_id"].as_str() != Some(original.job_id.as_str()) {
+            continue;
+        }
+        let output = &item["output"];
+        let Some(tool) = successful_validation_for_summary(output) else {
+            continue;
+        };
+        let mut compact = output.clone();
+        let mut omitted = Vec::new();
+        for stream in ["stdout", "stderr"] {
+            let key = format!("{stream}_tail");
+            let Some(text) = output.get(&key).and_then(Value::as_str) else {
+                continue;
+            };
+            let projected = compact_validation_log(text, tool, stream);
+            if projected != text {
+                compact[format!("{stream}_returned_lines")] = json!(projected.lines().count());
+                compact[key] = json!(projected);
+                omitted.push(stream);
+            }
+        }
+        if omitted.is_empty() {
+            continue;
+        }
+        compact["logs_omitted"] = json!(omitted);
+        compact["suggested_call"] = SuggestedToolCall::new(
+            "observe_jobs",
+            json!({
+                "items": [observe_jobs_item_argument_value(original)],
+                "tail_lines": tail_lines,
+                "summary_only": false,
+            }),
+        )
+        .to_value();
+        // Do not make tiny results larger merely to call them summaries.
+        if serialized_json_len(&compact).unwrap_or(usize::MAX)
+            < serialized_json_len(output).unwrap_or(0)
+        {
+            item["output"] = compact;
+        }
+    }
+    if let Some(arguments) = result.output.pointer_mut("/suggested_call/arguments") {
+        arguments["summary_only"] = json!(true);
+    }
+}
+
 fn batch_item(observed: ObservedJob) -> Value {
     if observed.result.success {
         let mut output = observed.result.output;
@@ -429,6 +573,8 @@ fn sparse_success_item(item: &Value) -> Option<Value> {
         "detected_summary",
         "validation",
         "ssh_resource",
+        "logs_omitted",
+        "suggested_call",
     ] {
         copy_non_null(observation, &mut sparse, key);
     }
