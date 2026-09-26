@@ -67,6 +67,29 @@ describe("Window collaboration", () => {
     view.unmount();
   });
 
+  it("ignores a read that resolves after the page becomes hidden but before the visibility event", async () => {
+    let visibility: DocumentVisibilityState = "visible";
+    vi.spyOn(document, "visibilityState", "get").mockImplementation(() => visibility);
+    const reads: { signal?: AbortSignal; resolve: (response: any) => void }[] = [];
+    const post = vi.fn((_path: string, _payload: unknown, signal?: AbortSignal) =>
+      new Promise(resolve => { reads.push({ signal, resolve }); }));
+    const client = { post } as unknown as RuntimeV2Client;
+    const view = render(<WindowCollaboration client={client} windowKey="exact-window" selectedSessionId="" language="en" onUnauthorized={vi.fn()} />);
+    expect(reads).toHaveLength(1);
+
+    visibility = "hidden";
+    expect(reads[0].signal?.aborted).toBe(false);
+    await act(async () => { reads[0].resolve({ ok: true, status: 200, data: transcript }); });
+    expect(screen.queryByText("Review done")).toBeNull();
+
+    visibility = "visible";
+    fireEvent(document, new Event("visibilitychange"));
+    expect(reads).toHaveLength(2);
+    await act(async () => { reads[1].resolve({ ok: true, status: 200, data: transcript }); });
+    expect(screen.getByText("Review done")).toBeTruthy();
+    view.unmount();
+  });
+
   it("retains an in-flight send and its retry identity while hidden", async () => {
     let finishSend!: (value: any) => void;
     const writes: unknown[] = [];

@@ -12,6 +12,10 @@ import {
 export type WindowCollaborationSendState = "idle" | "sending" | "uncertain" | "error";
 export type WindowCollaborationSendError = "conflict" | "context" | "unavailable" | "failed" | null;
 
+function pageIsHidden(): boolean {
+  return document.visibilityState === "hidden";
+}
+
 export function useWindowCollaboration(client: RuntimeV2Client, windowKey: string, onUnauthorized: () => void, active = true) {
   const [transcript, setTranscript] = useState<WindowCollaborationTranscript | null>(null);
   const [error, setError] = useState(false);
@@ -23,13 +27,13 @@ export function useWindowCollaboration(client: RuntimeV2Client, windowKey: strin
   activeRef.current = active;
   const inFlight = useRef<AbortController | null>(null);
   const refresh = useCallback(async () => {
-    if (!alive.current || !activeRef.current || document.visibilityState === "hidden" || inFlight.current) return;
+    if (!alive.current || !activeRef.current || pageIsHidden() || inFlight.current) return;
     const controller = new AbortController();
     const { signal } = controller;
     inFlight.current = controller;
     try {
       const response = await fetchWindowCollaboration(client, windowKey, signal);
-      if (!alive.current || signal.aborted || inFlight.current !== controller) return;
+      if (!alive.current || !activeRef.current || pageIsHidden() || signal.aborted || inFlight.current !== controller) return;
       if (response?.status === 401) onUnauthorized();
       if (response?.ok && response.data) { setTranscript(response.data); setError(false); }
       else { setError(true); if (response?.status === 403 || response?.status === 404) setTranscript(null); }
@@ -51,7 +55,7 @@ export function useWindowCollaboration(client: RuntimeV2Client, windowKey: strin
     };
     const updateVisibility = () => {
       stop();
-      if (!active || document.visibilityState === "hidden") return;
+      if (!active || pageIsHidden()) return;
       void refresh();
       timer = setInterval(() => void refresh(), 3000);
     };
