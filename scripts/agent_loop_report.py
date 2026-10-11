@@ -1899,6 +1899,64 @@ def _job_summary(trace_events: list[dict[str, Any]], trace_root_present: bool) -
     )
 
 
+def _summarize_result_bytes_by_tool(
+    audit_events: list[dict[str, Any]],
+    *,
+    action_audit_available: bool,
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    """Group existing outer ToolResult sizes by the existing ActionAudit tool key.
+
+    The report consumes only canonical numeric telemetry. No tool arguments,
+    result payloads, paths, identities or fingerprints are materialized.
+    """
+    if not action_audit_available:
+        return {}, {
+            "available": False,
+            "reason": "trace-only events do not provide canonical ToolResult byte sizes",
+            "unattributed_calls": None,
+        }
+
+    calls: Counter[str] = Counter()
+    measured: dict[str, list[int]] = {}
+    unattributed_calls = 0
+    selected_calls = 0
+    for event in audit_events:
+        if event.get("action_name") != "toolsCall":
+            continue
+        selected_calls += 1
+        tool = event.get("operation")
+        if not isinstance(tool, str) or not tool:
+            unattributed_calls += 1
+            continue
+        calls[tool] += 1
+        telemetry = _telemetry(event)
+        value = telemetry.get("serialized_result_bytes") if isinstance(telemetry, dict) else None
+        if type(value) is int and 0 <= value <= (1 << 64) - 1:
+            measured.setdefault(tool, []).append(value)
+
+    by_tool = {
+        tool: _metric_distribution(
+            measured.get(tool, []),
+            missing=calls[tool] - len(measured.get(tool, [])),
+        )
+        for tool in sorted(calls)
+    }
+    complete = bool(selected_calls) and unattributed_calls == 0 and all(
+        metric["missing"] == 0 for metric in by_tool.values()
+    )
+    reason = (
+        None if complete
+        else "no selected ActionAudit tool-call records" if not selected_calls
+        else "one or more outer calls lack a tool name" if unattributed_calls
+        else "one or more calls lack a valid unsigned serialized ToolResult byte count"
+    )
+    return by_tool, {
+        "available": complete,
+        "reason": reason,
+        "unattributed_calls": unattributed_calls,
+    }
+
+
 def _is_exact_hex(value: Any, length: int) -> bool:
     return (
         isinstance(value, str)
@@ -2112,6 +2170,11 @@ def summarize(*, trace_root: Path | None, audit_db: Path | None, workflow_sessio
     annotation = load_run_annotation(run_annotation) if run_annotation is not None else None
     annotated = _annotation_projection(annotation, benchmark)
     core["availability"].update(annotated["availability"])
+    by_tool_bytes, by_tool_availability = _summarize_result_bytes_by_tool(
+        audit_events, action_audit_available=audit_db is not None
+    )
+    core["results"]["serialized_tool_result_bytes_by_tool"] = by_tool_bytes
+    core["availability"]["serialized_tool_result_bytes_by_tool"] = by_tool_availability
     core["availability"]["native_batch_usage"] = {
         "available": False,
         "reason": "current payload-safe ActionAudit composition does not persist native batch item counts",

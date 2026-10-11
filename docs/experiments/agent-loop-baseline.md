@@ -169,6 +169,27 @@ Percentiles use deterministic nearest-rank semantics. For metrics with partially
 missing samples, `observed_total` and sample counts remain visible, while `total`
 is `null`; missing evidence is never substituted with zero.
 
+### Which tools produce the largest responses?
+
+The offline Agent Loop report now groups the **existing** ActionAudit
+`model_ergonomics.serialized_result_bytes` by its already-exposed outer
+tool name under `results.serialized_tool_result_bytes_by_tool`.
+Each tool receives its observed byte sum, available/missing call counts and
+deterministic nearest-rank p50/p95. Its `total` remains `null` if any
+selected call has missing, invalid or pre-result evidence; a complete tool
+remains usable even if another tool's evidence is incomplete.
+`availability.serialized_tool_result_bytes_by_tool` reports overall
+coverage and the number of outer calls without a tool name.
+
+Use only fully measured groups (`missing=0`) when ranking output-volume
+candidates for follow-up profiling. Missing tool names remain unattributed
+rather than being guessed from raw traces. Trace-only evidence returns
+an unavailable empty breakdown. This measure is the serialized model-facing
+ToolResult projection, excluding HTTP envelopes, model tokens, unrelated
+transport traffic, and nested Code Mode child results. It does not identify
+repeated text across calls or establish any end-to-end latency improvement.
+No runtime telemetry, tool schema or returned content is changed.
+
 ## Benchmark cases
 
 [`scripts/agent_loop_cases.json`](../../scripts/agent_loop_cases.json) is the

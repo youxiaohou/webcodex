@@ -1850,6 +1850,71 @@ class AgentLoopReportTests(unittest.TestCase):
         self.assertEqual(result["terminal_validation_failure_followed_by_observe_count"], 1)
 
 
+    def test_result_bytes_by_tool_reports_complete_and_incomplete_groups(self) -> None:
+        self.insert_event("read-a", tool="read_files", result_bytes=120)
+        self.insert_event("cargo", tool="cargo_test", status="failed", success=False,
+                          result_bytes=80, started=140, handed=160)
+        self.insert_event("read-b", tool="read_files", result_bytes=180,
+                          started=170, handed=190)
+        self.insert_event("read-missing", tool="read_files", result_bytes=None,
+                          started=200, handed=220)
+        self.insert_event("not-selected", session="wc_sess_other",
+                          tool="apply_text_edits", result_bytes=9000)
+        report_data = self.summarize()
+        by_tool = report_data["results"]["serialized_tool_result_bytes_by_tool"]
+        self.assertEqual(list(by_tool), ["cargo_test", "read_files"])
+        self.assertEqual(by_tool["cargo_test"], {
+            "total": 80, "observed_total": 80, "p50": 80, "p95": 80,
+            "samples": 1, "missing": 0,
+        })
+        self.assertEqual(by_tool["read_files"]["observed_total"], 300)
+        self.assertEqual(by_tool["read_files"]["samples"], 2)
+        self.assertEqual(by_tool["read_files"]["missing"], 1)
+        self.assertIsNone(by_tool["read_files"]["total"])
+        self.assertEqual(by_tool["read_files"]["p50"], 120)
+        self.assertEqual(by_tool["read_files"]["p95"], 180)
+        availability = report_data["availability"]["serialized_tool_result_bytes_by_tool"]
+        self.assertFalse(availability["available"])
+        self.assertEqual(availability["unattributed_calls"], 0)
+
+    def test_result_bytes_by_tool_invalid_sizes_do_not_count_as_zero(self) -> None:
+        self.insert_event("bool", tool="read_files", result_bytes=True)
+        self.insert_event("overflow", tool="read_files", result_bytes=1 << 64,
+                          started=150, handed=170)
+        self.insert_event("negative", tool="read_files", result_bytes=-1,
+                          started=200, handed=220)
+        self.insert_event("valid-zero", tool="run_shell", result_bytes=0,
+                          started=240, handed=260)
+        result = self.summarize()
+        by_tool = result["results"]["serialized_tool_result_bytes_by_tool"]
+        self.assertEqual(by_tool["read_files"]["samples"], 0)
+        self.assertEqual(by_tool["read_files"]["missing"], 3)
+        self.assertIsNone(by_tool["read_files"]["total"])
+        self.assertEqual(by_tool["run_shell"]["total"], 0)
+        self.assertFalse(result["availability"]["serialized_tool_result_bytes_by_tool"]["available"])
+
+    def test_result_bytes_by_tool_unattributed_and_trace_only_unavailable(self) -> None:
+        grouped, availability = report._summarize_result_bytes_by_tool([
+            {"action_name": "toolsCall", "operation": None,
+             "summary": {"model_ergonomics": {"serialized_result_bytes": 77}}},
+            {"action_name": "toolsCall", "operation": "read_files",
+             "summary": {"model_ergonomics": {"serialized_result_bytes": 17}}},
+        ], action_audit_available=True)
+        self.assertEqual(grouped["read_files"]["total"], 17)
+        self.assertFalse(availability["available"])
+        self.assertEqual(availability["unattributed_calls"], 1)
+        empty, unavailable = report._summarize_result_bytes_by_tool(
+            [], action_audit_available=True
+        )
+        self.assertEqual(empty, {})
+        self.assertFalse(unavailable["available"])
+        trace, unavailable = report._summarize_result_bytes_by_tool(
+            [], action_audit_available=False
+        )
+        self.assertEqual(trace, {})
+        self.assertIsNone(unavailable["unattributed_calls"])
+        self.assertFalse(unavailable["available"])
+
 class JobConvergenceTests(unittest.TestCase):
     @staticmethod
     def row(
