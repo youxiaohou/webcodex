@@ -172,7 +172,7 @@ also protects the flag without requiring real-process execution.
 Run native verification explicitly:
 
 ```text
-cargo test --locked -p webcodex-runner --features runner-real-process-tests runner_real_process_native_single_file_search -- --ignored --test-threads=1 --nocapture
+cargo test --locked -p webcodex-runner --features runner-real-process-tests runner_real_process_native_search_preserves_modes_and_fallback -- --ignored --test-threads=1 --nocapture
 ```
 
 This closes the native correctness gap for the scenarios listed above. It does
@@ -203,10 +203,10 @@ OAuth scope, App visibility, resource metadata, input bound or execution
 permission is widened. The existing canonical input cache remains unchanged;
 this is not a claim that cold initialization derives only selected enum variants.
 
-Final focused validation passed 94 tests: 27 Runner search/process/Job lifecycle
-tests (including the two explicitly enabled native rg fixtures), 14 MCP list
-checks, 10 compact projection checks, 42 search/parser/model-surface/App checks,
-and one descriptor/full-contract parity test. The new 12-case auth/protocol/Apps
+Pre-integration focused validation passed 94 tests: 27 Runner search/process/Job
+lifecycle tests (including the two explicitly enabled native rg fixtures),
+14 MCP list checks, 10 compact projection checks, 42 search/parser/model-surface/App
+checks, and one descriptor/full-contract parity test. The new 12-case auth/protocol/Apps
 matrix proves zero canonical output-schema materializations in compact mode
 and one input materialization for each selected canonical tool. Full/compact
 schema parity, discovery order and metadata are also checked. Formatting and
@@ -235,13 +235,13 @@ below and do not establish end-to-end ChatGPT latency.
 ### Repeated Windows A/B measurement
 
 The measured baseline is commit `805fc51d2c61172532d4bd95d3cf9b5bc90dc181`;
-the optimized side is the optimization checkpoint in this PR, before integration
-with newer upstream commits. Both used isolated source snapshots and the
-`dogfood` profile on Windows 11 build 26200, an Intel Core i7-9750H (12 logical
-processors), 31.8 GiB RAM, rustc 1.96.0 and ripgrep 15.2.0. Source fingerprints,
-fresh package compilation and distinct baseline/optimized executable hashes
-were checked before sampling. A detected Cargo snapshot cache reuse was
-invalidated and both variants rebuilt before any reported sample was taken.
+the optimized side is checkpoint `98e58fa66825484a3228c4b99d1398bf7b10f7c3`,
+before integration with newer upstream commits. Both used isolated source
+snapshots and the `dogfood` profile on Windows 11 build 26200, an Intel Core
+i7-9750H (12 logical processors), 31.8 GiB RAM, rustc 1.96.0 and ripgrep 15.2.0.
+Source fingerprints, fresh package compilation and distinct baseline/optimized
+executable hashes were checked before sampling. A detected Cargo snapshot cache
+reuse was invalidated and both variants rebuilt before any reported sample was taken.
 
 Each case/variant had 10 warmups followed by 100 measured runs. Baseline and
 optimized requests alternated AB/BA within each case. Mean is the arithmetic
@@ -289,3 +289,34 @@ initialization, arbitrary projects, production P95 or end-to-end ChatGPT speed.
 After upstream integration, focused correctness checks are rerun; these timings
 remain attributed to the original measured checkpoint rather than the newer
 integrated PR head.
+
+The integrated upstream baseline is `d87a9632`, which already includes PR #1034's
+immutable schema cache and schema-free routing checks. The percentages above
+are relative to `805fc51d`, not an incremental A/B measurement against that newer
+main. Integration preserves both upstream improvements.
+
+### Validation after upstream integration
+
+Focused checks on the integrated Rust source passed 92 tests:
+
+| Check | Passed |
+|---|---:|
+| Descriptor/full-contract parity | 1 |
+| Runner native-search checks | 6 |
+| Explicit real-process native rg/fallback fixtures | 2 |
+| MCP tools/list | 14 |
+| MCP compact projection | 10 |
+| Model surface and routing | 31 |
+| Project search command/parser | 24 |
+| Agent and Job continuation App discovery | 2 |
+| Opt-in execution-control schema | 1 |
+| Schema-free operator-extension route lookup | 1 |
+
+An initial local compile selected a stale core artifact and reported the missing
+`project_search` export even though that module existed in the current source.
+The changed Rust files' mtimes were refreshed without changing their bytes;
+Cargo then explicitly recompiled core and its dependents, and every check above
+passed. This is separate from the pre-sampling cache invalidation recorded above.
+Formatting, whitespace and repository-local Markdown links also passed. These
+checks do not include a full workspace/E2E run, deployment, Linux/macOS execution
+or a new performance measurement of the integrated head.
