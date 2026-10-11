@@ -159,6 +159,47 @@ pub(crate) fn is_server_owned_orchestration_argument(field: &str) -> bool {
     SERVER_OWNED_ARGUMENT_FIELDS.contains(&field) || field.starts_with("__webcodex_")
 }
 
+// Nested calls already own their parsed JSON arguments. Moving the map
+// preserves all payload bytes and avoids deep cloning potentially large
+// editor requests, while retaining canonical server-owned-field rejection.
+fn prepare_orchestration_arguments(
+    arguments: Value,
+    project: &str,
+    session_id: &str,
+    additional_forbidden_fields: &[&str],
+) -> Result<Value, OrchestrationHostError> {
+    let Value::Object(mut arguments) = arguments else {
+        return Err(OrchestrationHostError::new(
+            OrchestrationHostFailureKind::InvalidArguments,
+            "nested tool arguments must be a JSON object",
+        ));
+    };
+    if let Some(field) = arguments
+        .keys()
+        .find(|field| is_server_owned_orchestration_argument(field))
+    {
+        return Err(OrchestrationHostError::new(
+            OrchestrationHostFailureKind::InvalidArguments,
+            format!("nested tool arguments may not set server-owned field `{field}`"),
+        ));
+    }
+    if let Some(field) = additional_forbidden_fields
+        .iter()
+        .find(|field| arguments.contains_key(**field))
+    {
+        return Err(OrchestrationHostError::new(
+            OrchestrationHostFailureKind::InvalidArguments,
+            format!("nested tool arguments may not set frontend-reserved field `{field}`"),
+        ));
+    }
+    arguments.insert("project".to_string(), Value::String(project.to_string()));
+    arguments.insert(
+        "session_id".to_string(),
+        Value::String(session_id.to_string()),
+    );
+    Ok(Value::Object(arguments))
+}
+
 /// Payload-free diagnostic summary for one outer orchestration program. It is
 /// observability only and never participates in authority, routing, Session,
 /// Window, retry, or idempotency decisions.
@@ -719,38 +760,12 @@ impl CanonicalOrchestrationHost {
     }
 
     fn prepare_arguments(&self, arguments: Value) -> Result<Value, OrchestrationHostError> {
-        let Some(mut arguments) = arguments.as_object().cloned() else {
-            return Err(OrchestrationHostError::new(
-                OrchestrationHostFailureKind::InvalidArguments,
-                "nested tool arguments must be a JSON object",
-            ));
-        };
-        if let Some(field) = arguments
-            .keys()
-            .find(|field| is_server_owned_orchestration_argument(field))
-        {
-            return Err(OrchestrationHostError::new(
-                OrchestrationHostFailureKind::InvalidArguments,
-                format!("nested tool arguments may not set server-owned field `{field}`"),
-            ));
-        }
-        if let Some(field) = self
-            .policy
-            .additional_forbidden_argument_fields
-            .iter()
-            .find(|field| arguments.contains_key(**field))
-        {
-            return Err(OrchestrationHostError::new(
-                OrchestrationHostFailureKind::InvalidArguments,
-                format!("nested tool arguments may not set frontend-reserved field `{field}`"),
-            ));
-        }
-        arguments.insert("project".to_string(), Value::String(self.project.clone()));
-        arguments.insert(
-            "session_id".to_string(),
-            Value::String(self.session_id.clone()),
-        );
-        Ok(Value::Object(arguments))
+        prepare_orchestration_arguments(
+            arguments,
+            &self.project,
+            &self.session_id,
+            self.policy.additional_forbidden_argument_fields,
+        )
     }
 
     pub(crate) async fn invoke_tool(
@@ -945,6 +960,10 @@ impl CanonicalOrchestrationHost {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "orchestration_host/argument_tests.rs"]
+mod argument_tests;
 
 #[cfg(test)]
 mod receipt_tests {
