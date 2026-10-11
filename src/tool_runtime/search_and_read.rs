@@ -36,12 +36,14 @@ fn match_read_items(
         .collect()
 }
 
-fn sanitize_batch_search_and_collect_successes(batch: &mut Value) -> Vec<Value> {
-    let mut successful = Vec::new();
+// Read planning only borrows the successful search results. They are also
+// retained in the canonical batch for final model projection, so cloning each
+// large source preview here duplicated exactly the same evidence in memory.
+fn sanitize_batch_search_and_collect_successes(batch: &mut Value) -> Vec<&Value> {
     let Some(items) = batch.get_mut("items").and_then(Value::as_array_mut) else {
-        return successful;
+        return Vec::new();
     };
-    for item in items {
+    for item in items.iter_mut() {
         if item.get("success").and_then(Value::as_bool) != Some(true) {
             continue;
         }
@@ -55,9 +57,12 @@ fn sanitize_batch_search_and_collect_successes(batch: &mut Value) -> Vec<Value> 
                 }
             }
         }
-        successful.push(output.clone());
     }
-    successful
+    items
+        .iter()
+        .filter(|item| item.get("success").and_then(Value::as_bool) == Some(true))
+        .filter_map(|item| item.get("output"))
+        .collect()
 }
 
 /// Reuse the ordinary search projection only after match-derived read planning has consumed
@@ -169,14 +174,14 @@ fn compact_materialized_search_evidence(search: &mut Value, reads: &Value) {
     }
 }
 
-fn fair_match_read_items(
-    searches: &[Value],
+fn fair_match_read_items<'a>(
+    searches: impl IntoIterator<Item = &'a Value>,
     read_before: usize,
     read_after: usize,
     max_reads: usize,
 ) -> Vec<ReadFilesItem> {
     let per_query: Vec<Vec<ReadFilesItem>> = searches
-        .iter()
+        .into_iter()
         .map(|search| match_read_items(search, read_before, read_after, max_reads))
         .collect();
     let mut result = Vec::with_capacity(max_reads);
@@ -277,10 +282,23 @@ impl ToolRuntime {
                 json!({"project": resolved.resolved_id, "search": batch_search_output, "state_changed": false}),
             );
         }
-        let items = fair_match_read_items(&search_outputs, read_before, read_after, max_reads);
-        let projected_search = compact_compound_search(batch_search_output, &default_timeouts);
+        let items = fair_match_read_items(
+            search_outputs.into_iter(),
+            read_before,
+            read_after,
+            max_reads,
+        );
+        let mut projected_search = compact_compound_search(batch_search_output, &default_timeouts);
         let mut search_output = if query_count == 1 {
-            projected_search["items"][0]["output"].clone()
+            // The wrapper is not returned for a single-query compound search.
+            // Move its result payload instead of cloning all match previews.
+            projected_search
+                .get_mut("items")
+                .and_then(Value::as_array_mut)
+                .and_then(|items| items.first_mut())
+                .and_then(|item| item.get_mut("output"))
+                .map(std::mem::take)
+                .unwrap_or(Value::Null)
         } else {
             // Keep query correspondence and failures; only redundant presentation metadata is removed.
             projected_search
@@ -337,6 +355,10 @@ impl ToolRuntime {
         }))
     }
 }
+
+#[cfg(test)]
+#[path = "search_and_read/borrowing_tests.rs"]
+mod borrowing_tests;
 
 #[cfg(test)]
 mod tests {
