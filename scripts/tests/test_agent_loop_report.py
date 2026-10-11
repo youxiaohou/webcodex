@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from contextlib import closing
 import json
 import sqlite3
 import tempfile
@@ -132,7 +133,7 @@ class AgentLoopReportTests(unittest.TestCase):
             summary["model_ergonomics"] = telemetry
         if composition is not None:
             summary["code_mode_composition"] = composition
-        with sqlite3.connect(self.audit_db) as connection:
+        with closing(sqlite3.connect(self.audit_db)) as connection, connection:
             connection.execute(
                 """
                 INSERT INTO action_events (
@@ -301,7 +302,7 @@ class AgentLoopReportTests(unittest.TestCase):
     def test_input_normalization_unknown_codes_and_raw_summary_never_leak(self) -> None:
         self.insert_input_event("a", normalization_code="PRIVATE_UNKNOWN_CODE")
         self.insert_input_event("b", normalization_code={"PRIVATE_KEY": "PRIVATE_VALUE"})
-        with sqlite3.connect(self.audit_db) as connection:
+        with closing(sqlite3.connect(self.audit_db)) as connection, connection:
             connection.execute("UPDATE action_events SET summary_json = json_set(summary_json, '$.raw_arguments', 'PRIVATE_ARGS', '$.output', 'PRIVATE_OUTPUT')")
         result = self.summarize()
         metrics = result["input_ergonomics"]
@@ -326,7 +327,7 @@ class AgentLoopReportTests(unittest.TestCase):
     def test_input_repair_proxy_requires_boolean_success_in_context(self) -> None:
         self.insert_input_event("a", success=False, error_kind="invalid_arguments")
         self.insert_input_event("b", link=False, started=130, handed=140, transition="serial", previous_trace_id="a")
-        with sqlite3.connect(self.audit_db) as connection:
+        with closing(sqlite3.connect(self.audit_db)) as connection, connection:
             connection.execute("UPDATE action_events SET summary_json = json_set(summary_json, '$.model_ergonomics.success', 1) WHERE event_id = 'b'")
         proxy = self.summarize()["input_ergonomics"]["immediate_same_tool_repair_proxy"]
         self.assertFalse(proxy["available"])
@@ -829,7 +830,7 @@ class AgentLoopReportTests(unittest.TestCase):
             transition="serial",
             window="hashed-window-a",
         )
-        with sqlite3.connect(self.audit_db) as connection:
+        with closing(sqlite3.connect(self.audit_db)) as connection, connection:
             connection.execute(
                 "UPDATE action_events SET summary_json = 'not-json' WHERE event_id = 'other-session'"
             )
@@ -1823,7 +1824,7 @@ class AgentLoopReportTests(unittest.TestCase):
         values = [JobConvergenceTests.row(1, kind="pending_handoff"),
                   JobConvergenceTests.row(2, 1, "explicit_observe", terminal=2000),
                   JobConvergenceTests.row(3, 2)]
-        with sqlite3.connect(self.audit_db) as connection:
+        with closing(sqlite3.connect(self.audit_db)) as connection, connection:
             for row in values:
                 connection.execute("UPDATE action_events SET summary_json = ? WHERE event_id = ?",
                                    (json.dumps(row["summary"]), row["event_id"]))
@@ -1840,7 +1841,7 @@ class AgentLoopReportTests(unittest.TestCase):
         terminal = JobConvergenceTests.row(2, 1, "passive_terminal", failure=True, terminal=2000)
         terminal["summary"]["model_ergonomics"]["job_convergence"]["events"][0]["validation_failure"] = True
         observe = JobConvergenceTests.row(3, 2, "explicit_observe", terminal=2000)
-        with sqlite3.connect(self.audit_db) as connection:
+        with closing(sqlite3.connect(self.audit_db)) as connection, connection:
             for row in [pending, terminal, observe]:
                 connection.execute("UPDATE action_events SET summary_json = ? WHERE event_id = ?",
                                    (json.dumps(row["summary"]), row["event_id"]))
