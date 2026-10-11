@@ -3912,11 +3912,39 @@ async fn mcp_tools_call_unknown_tool_is_bad_request() {
                 .as_str()
                 .unwrap()
                 .contains("no_such_tool"));
+            assert!(!value["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("call_runtime_tool"));
         }
         other => panic!("expected BadRequest, got {:?}", other),
     }
 }
 
+#[tokio::test]
+async fn mcp_tools_call_registered_long_tail_recommends_gateway() {
+    let runtime = test_runtime();
+    let outcome = handle_mcp_request(
+        &runtime,
+        rpc(
+            "tools/call",
+            Some(Value::from(6)),
+            json!({"name": "list_projects", "arguments": {}}),
+        ),
+        None,
+    )
+    .await;
+    match outcome {
+        McpOutcome::BadRequest(value) => {
+            assert_eq!(value["error"]["code"], -32602);
+            assert!(value["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("call_runtime_tool"));
+        }
+        other => panic!("expected BadRequest, got {:?}", other),
+    }
+}
 #[tokio::test]
 async fn mcp_2026_control_sidecars_gateway_strip_and_closed_schema() {
     let temp = tempfile::tempdir().unwrap();

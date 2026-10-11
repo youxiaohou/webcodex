@@ -2906,10 +2906,14 @@ pub(super) async fn handle_call(
         return McpOutcome::BadRequest(rpc_error(
             id,
             -32602,
-            format!(
-                "tool '{}' is not directly callable on Adaptive Runtime; use call_runtime_tool for admitted model-visible long-tail tools",
-                params.name
-            ),
+            if is_model_visible_tool_name(&params.name) {
+                format!("tool '{}' is not directly callable; use call_runtime_tool for admitted model-visible long-tail tools", params.name)
+            } else {
+                format!(
+                    "tool '{}' is not a registered model-visible tool on this MCP runtime",
+                    params.name
+                )
+            },
         ));
     }
     // From here on, the MCP boundary has established a model-visible runtime
