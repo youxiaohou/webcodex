@@ -434,7 +434,7 @@ pub(crate) fn project_tool_result_suggested_calls<F>(
     if let Some(error) = result.error.as_ref() {
         envelope["error"] = Value::String(error.clone());
     }
-    let schema = webcodex_tool_contracts::output_schema_for_tool(tool_name);
+    let schema = webcodex_tool_contracts::shared_output_schema_for_tool(tool_name);
     project_suggested_tool_calls_in_value(&mut envelope, &schema, route_for);
     result.output = envelope
         .as_object_mut()

@@ -150,11 +150,7 @@ fn mcp_adaptive_runtime_gateway_target_route(
 ) -> crate::model_surface::AdaptiveRuntimeGatewayTargetRoute {
     use crate::model_surface::AdaptiveRuntimeGatewayTargetRoute;
 
-    if stateless_2026
-        && crate::tool_runtime::stateless_operator_extension_tool_specs()
-            .iter()
-            .any(|spec| spec.name == target)
-    {
+    if stateless_2026 && runtime_tool_operator_extension_family(target).is_some() {
         let (availability, gateway_tool) =
             crate::model_surface::adaptive_runtime_tool_invocation_route_with_operator_extension(
                 target, true,
@@ -201,10 +197,8 @@ fn mcp_suggested_tool_call_route(target: &str, stateless_2026: bool) -> Suggeste
     if target == crate::mcp_gateway::MCP_TOOL_NAME {
         return SuggestedToolCallRoute::Gateway(ADAPTIVE_RUNTIME_GATEWAY_TOOL_NAME);
     }
-    let operator_extension_admitted = stateless_2026
-        && crate::tool_runtime::stateless_operator_extension_tool_specs()
-            .iter()
-            .any(|spec| spec.name == target);
+    let operator_extension_admitted =
+        stateless_2026 && runtime_tool_operator_extension_family(target).is_some();
     crate::model_surface::suggested_tool_call_route(target, operator_extension_admitted)
 }
 

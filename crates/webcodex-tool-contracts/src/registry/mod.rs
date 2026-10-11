@@ -6,8 +6,8 @@ pub use annotations::tool_annotations;
 #[cfg(any(test, feature = "root-test-support"))]
 pub use output_schemas::coding_workflow_diagnostic_output_schema_for_test;
 pub use output_schemas::{
-    continuation_semantics_schema, output_schema_for_tool, suggested_tool_call_schema,
-    suggested_tool_call_schema_target,
+    continuation_semantics_schema, output_schema_for_tool, shared_output_schema_for_tool,
+    suggested_tool_call_schema, suggested_tool_call_schema_target,
 };
 pub use tool_specs::{
     agent_continuation_app_tool_specs, artifact_app_tool_specs,
