@@ -579,8 +579,10 @@ fn runner_real_process_native_search_directory_globs_and_bounds() {
     assert!(run(&policy, &missing_rg, &payload, None).is_none());
 }
 
+#[cfg(feature = "runner-real-process-tests")]
 #[test]
-fn native_search_prefix_executor_preserves_lifecycle() {
+#[ignore = "real child-process timeout and cleanup; run explicitly with runner-real-process-tests"]
+fn runner_real_process_native_search_prefix_executor_preserves_lifecycle() {
     let cwd = tempfile::tempdir().unwrap();
     let helper = process_argv_helper();
     let run = |args: &[&str], timeout: u64, stopped: Option<&AtomicBool>| {
