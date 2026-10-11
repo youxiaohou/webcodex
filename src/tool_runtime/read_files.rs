@@ -363,11 +363,110 @@ fn serialized_value_len(value: &Value) -> usize {
     serialized_json_len(value).unwrap_or(usize::MAX)
 }
 
+// The projection needs the read metadata, not a second allocation of each
+// (potentially hundreds of KiB) text body. Temporarily substitute empty JSON
+// strings in the cloned view and add the exact serialized lengths of the
+// original strings back to the measured envelope.
+fn cloned_batch_without_read_text<'a>(output: &'a Value) -> (Value, Vec<(usize, &'a str)>) {
+    let Some(root) = output.as_object() else {
+        return (output.clone(), Vec::new());
+    };
+    let mut texts = Vec::new();
+    let mut clone = serde_json::Map::new();
+    for (key, value) in root {
+        if key == "items" {
+            if let Some(items) = value.as_array() {
+                let items = items
+                    .iter()
+                    .enumerate()
+                    .map(|(index, item)| {
+                        let Some(fields) = item.as_object() else {
+                            return item.clone();
+                        };
+                        let Some(read_fields) = fields.get("output").and_then(Value::as_object)
+                        else {
+                            return item.clone();
+                        };
+                        let Some(text) = read_fields.get("text").and_then(Value::as_str) else {
+                            return item.clone();
+                        };
+                        texts.push((index, text));
+                        let mut read_clone = serde_json::Map::new();
+                        for (key, value) in read_fields {
+                            read_clone.insert(
+                                key.clone(),
+                                if key == "text" {
+                                    json!("")
+                                } else {
+                                    value.clone()
+                                },
+                            );
+                        }
+                        let mut item_clone = serde_json::Map::new();
+                        for (key, value) in fields {
+                            if key != "output" {
+                                item_clone.insert(key.clone(), value.clone());
+                            }
+                        }
+                        item_clone.insert("output".to_string(), Value::Object(read_clone));
+                        Value::Object(item_clone)
+                    })
+                    .collect::<Vec<_>>();
+                clone.insert(key.clone(), Value::Array(items));
+                continue;
+            }
+        }
+        clone.insert(key.clone(), value.clone());
+    }
+    (Value::Object(clone), texts)
+}
+
+// serde_json emits printable UTF-8 bytes unchanged and escapes only ASCII
+// control bytes, quote and backslash. Count this exactly instead of invoking
+// a second JSON serializer on potentially large unchanged read bodies.
+fn serialized_read_text_len(text: &str) -> Option<usize> {
+    let mut bytes = text.len().checked_add(2)?; // opening and closing JSON quotes
+    for byte in text.bytes() {
+        let extra = match byte {
+            b'"' | b'\\' | b'\x08' | b'\t' | b'\n' | b'\x0c' | b'\r' => 1,
+            0x00..=0x1f => 5, // JSON \\u00XX expands one input byte to six
+            _ => 0,
+        };
+        bytes = bytes.checked_add(extra)?;
+    }
+    Some(bytes)
+}
+
 fn projected_batch_serialized_len(output: &Value, projection: &ReadModelProjection) -> usize {
-    let mut projected = ToolResult::ok(output.clone());
+    let (lightweight, texts) = cloned_batch_without_read_text(output);
+    let mut projected = ToolResult::ok(lightweight);
     add_actionable_read_continuations(projection, &mut projected);
     super::result_projection::sparsify_complete_read_success("read_files", &mut projected);
-    serialized_json_len(&projected).unwrap_or(usize::MAX)
+
+    // If a later projection changes/removes the text field, its semantics
+    // must be measured by the canonical path rather than silently undercounted.
+    if texts
+        .iter()
+        .any(|(index, _)| projected.output["items"][*index]["output"]["text"].as_str() != Some(""))
+    {
+        let mut original = ToolResult::ok(output.clone());
+        add_actionable_read_continuations(projection, &mut original);
+        super::result_projection::sparsify_complete_read_success("read_files", &mut original);
+        return serialized_json_len(&original).unwrap_or(usize::MAX);
+    }
+    let Some(mut bytes) = serialized_json_len(&projected).ok() else {
+        return usize::MAX;
+    };
+    for (_, text) in texts {
+        let Some(encoded_text) = serialized_read_text_len(text) else {
+            return usize::MAX;
+        };
+        let Some(next) = bytes.checked_add(encoded_text.saturating_sub(2)) else {
+            return usize::MAX;
+        };
+        bytes = next;
+    }
+    bytes
 }
 
 fn projected_read_item_len(item: &Value) -> usize {
@@ -1868,6 +1967,175 @@ mod tests {
             webcodex_workspace::file_read_range::MAX_RANGE_CONTENT_BYTES,
             192 * 1024
         );
+    }
+
+    fn canonical_projected_batch_bytes(output: &Value, projection: &ReadModelProjection) -> usize {
+        let mut result = ToolResult::ok(output.clone());
+        add_actionable_read_continuations(projection, &mut result);
+        super::super::result_projection::sparsify_complete_read_success("read_files", &mut result);
+        serialized_json_len(&result).unwrap_or(usize::MAX)
+    }
+
+    #[test]
+    fn serialized_read_text_len_matches_serde_json_for_all_control_bytes_and_utf8() {
+        let control: String = (0u8..=0x1f).map(char::from).collect();
+        let examples = [
+            "",
+            "\"",
+            "\\",
+            "\n\r\t\x08\x0c",
+            "\u{0000}\u{001f}\u{007f}",
+            "slash / and HTML < > &",
+            "Àéहिंदी日本語🦀",
+            "\u{2028}\u{2029}\u{0085}",
+            "control plus quotes",
+        ];
+        for text in examples
+            .iter()
+            .copied()
+            .chain(std::iter::once(control.as_str()))
+        {
+            assert_eq!(
+                serialized_read_text_len(text),
+                Some(serialized_json_len(text).unwrap()),
+                "exact escaped JSON length must match serde_json for {text:?}"
+            );
+        }
+        let mixed = format!(
+            "{}{}{}{}",
+            control.repeat(140),
+            "quotes \\\" and escaped \\\\ \n\r\t".repeat(400),
+            "界🦀".repeat(4096),
+            "ASCII only".repeat(2048),
+        );
+        assert_eq!(
+            serialized_read_text_len(&mixed),
+            Some(serialized_json_len(&mixed).unwrap())
+        );
+        assert_eq!(
+            serialized_read_text_len(&"x".repeat(128 * 1024)),
+            Some(128 * 1024 + 2)
+        );
+    }
+
+    #[test]
+    fn projected_budget_measurement_skips_read_text_copies_exactly() {
+        let strings = [
+            String::new(),
+            "plain ASCII".to_string(),
+            "unicode 漢字 🦀 café".to_string(),
+            "quote=\\\" escape=\\\\ newline=\\n tab=\\t".to_string(),
+            "\\u{0000}\\u{0001}\\u{001f}\\u{007f}".to_string(),
+            "A".repeat(95 * 1024),
+            "界".repeat(20 * 1024),
+        ];
+        for value in &strings {
+            for (numbered, output_truncated) in [(false, false), (true, false), (false, true)] {
+                let mut item = if numbered {
+                    ranged_item(0, 11, &[value.clone()])
+                } else {
+                    default_complete_item(0, &[value.clone()])
+                };
+                if output_truncated {
+                    item["output"]["has_more"] = json!(true);
+                    item["output"]["total_lines"] = json!(30);
+                    item["output"]["next_start_line"] = json!(12);
+                    item["output"]["budget_truncated"] = json!(true);
+                    item["output"]["budget_next_limit"] = json!(19);
+                }
+                let mut output = batch_output(
+                    "agent:oe:demo",
+                    1,
+                    vec![item],
+                    output_truncated,
+                    output_truncated.then_some(0),
+                    output_truncated.then_some("batch_response_budget"),
+                );
+                // Data unrelated to read text must still count in the exact
+                // projection; known/unknown fields cannot disappear.
+                output["unknown_metadata"] = json!({
+                    "unicode": "田中 🦀",
+                    "escaped": "one\\ntwo\\tthree",
+                });
+                let projection = ReadModelProjection::Batch {
+                    project: "agent:oe:demo".to_string(),
+                    items: vec![ReadFilesItem {
+                        path: "src/0.rs".to_string(),
+                        start_line: Some(if numbered { 11 } else { 1 }),
+                        limit: Some(100),
+                        expected_read_revision: None,
+                    }],
+                    session_id: Some("wc_sess_budget_probe".to_string()),
+                    with_line_numbers: Some(numbered),
+                    max_result_bytes: Some(256 * 1024),
+                };
+                let snapshot = output.clone();
+                let expected = canonical_projected_batch_bytes(&output, &projection);
+                let actual = projected_batch_serialized_len(&output, &projection);
+                assert_eq!(actual, expected,
+                    "JSON projection sizing must match canonical bytes: numbered={numbered}, truncated={output_truncated}, input_bytes={}",
+                    value.len());
+                assert_eq!(
+                    output, snapshot,
+                    "measurement must not mutate original read result"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn projected_budget_measurement_preserves_multiple_and_malformed_items() {
+        let mut failed = ranged_item(2, 3, &["failed".to_string()]);
+        failed["success"] = json!(false);
+        failed["error"] = json!("private failure");
+        let outputs = [
+            batch_output(
+                "agent:oe:demo",
+                3,
+                vec![
+                    default_complete_item(0, &["valid".to_string()]),
+                    ranged_item(1, 21, &["test".repeat(30_000)]),
+                    failed,
+                ],
+                false,
+                None,
+                None,
+            ),
+            batch_output(
+                "agent:oe:demo",
+                2,
+                vec![
+                    json!({"success": true, "index": 0, "output": {"text": ["not", "a", "string"]}}),
+                    json!({"success": false, "index": 1, "error": "failed", "output": null}),
+                ],
+                true,
+                Some(1),
+                Some("hard_result_cap"),
+            ),
+            batch_output(
+                "agent:oe:demo",
+                0,
+                vec![],
+                true,
+                Some(0),
+                Some("hard_result_cap"),
+            ),
+            json!({"items": "not an array", "other": {"text": "PRIVATE"}}),
+            json!({"items": [null, [], {}, {"output": {"text": "content"}}]}),
+        ];
+        for output in &outputs {
+            for projection in [
+                batch_projection(3, None),
+                batch_projection(3, Some(MAX_SERIALIZED_OUTPUT_BYTES)),
+                ReadModelProjection::None,
+            ] {
+                assert_eq!(
+                    projected_batch_serialized_len(output, &projection),
+                    canonical_projected_batch_bytes(output, &projection),
+                    "malformed/partial/read_failure schema cannot change size accounting"
+                );
+            }
+        }
     }
 
     #[test]
