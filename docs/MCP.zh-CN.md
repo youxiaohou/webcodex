@@ -151,8 +151,10 @@ Markdown bundle 已提交在单 script App 资源内，纯 Rust 编译不需要 
 该检查同时接入 `check:dist`。
 
 展示调用会保存这条窗口绑定，但不会启动 live Window activity；侧边栏入口和 App
-刷新调用也不会启动 live Window activity。当前界面资源是
-`ui://webcodex/work-result/v17`，旧版资源 URI 不再提供模板，避免缓存界面调用已退役的工具名。
+刷新调用也不会启动 live Window activity。新卡片使用当前 descriptor 公布的 Work Result
+资源 URI，其身份由[canonical App registry](../src/mcp/app_registry/builtin.rs)维护。
+刷新 Host schema 并重新打开缓存 reader，以加载当前 thread-panel、lazy-detail 和工具名
+契约；旧版资源 URI 不再提供模板，避免缓存界面调用已退役的工具名。
 
 界面展示入口保留默认的 model/App 可见性；App-only 桥接工具只返回数据，不声明
 `ui.resourceUri`。ChatGPT 刷新工具时会拒绝声明界面资源的私有工具。更新 Server
