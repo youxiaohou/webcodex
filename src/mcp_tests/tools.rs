@@ -1,5 +1,132 @@
 use super::*;
 
+#[tokio::test]
+async fn mcp_route_recovery_rejects_unavailable_tools_without_gateway_retry() {
+    let runtime = test_runtime_with_mcp_settings(true, false);
+    for stateless in [false, true] {
+        for name in [
+            "tool_manifest",
+            "runtime_status",
+            "unknown_tool_name",
+            "get_work_result_state",
+        ] {
+            let params = json!({"name": name, "arguments": {}});
+            let params = if stateless {
+                mcp_2026_params(params)
+            } else {
+                params
+            };
+            let outcome =
+                handle_mcp_request(&runtime, rpc("tools/call", Some(json!(8100)), params), None)
+                    .await;
+            let McpOutcome::BadRequest(value) = outcome else {
+                panic!("unavailable tool must be rejected before execution: {name}");
+            };
+            assert_eq!(value["error"]["code"], -32602);
+            let message = value["error"]["message"].as_str().unwrap();
+            assert!(message.contains("unavailable"), "{name}: {message}");
+            assert!(message.contains("tools/list"), "{name}: {message}");
+            assert!(!message.contains("call_runtime_tool"), "{name}: {message}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn mcp_route_recovery_suggests_gateway_only_with_current_scope() {
+    let runtime = test_runtime_with_mcp_settings(true, false);
+    let mut restricted = crate::auth::AuthContext::new(crate::auth::AuthKind::OAuth2Token);
+    restricted.scopes = vec!["runtime:read".to_string()];
+    for stateless in [false, true] {
+        for auth in [None, Some(&restricted)] {
+            let params = json!({"name": "list_projects", "arguments": {}});
+            let params = if stateless {
+                mcp_2026_params(params)
+            } else {
+                params
+            };
+            let outcome =
+                handle_mcp_request(&runtime, rpc("tools/call", Some(json!(8101)), params), auth)
+                    .await;
+            let McpOutcome::BadRequest(value) = outcome else {
+                panic!("gateway-only tool must not execute directly");
+            };
+            assert_eq!(value["error"]["code"], -32602);
+            let message = value["error"]["message"].as_str().unwrap();
+            assert_eq!(
+                message.contains("call_runtime_tool"),
+                auth.is_none(),
+                "{message}"
+            );
+            if auth.is_some() {
+                assert!(message.contains("authorization"), "{message}");
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn mcp_route_recovery_current_discovery_matches_callable_contracts() {
+    let runtime = test_runtime_with_mcp_settings(true, false);
+    let outcome = handle_mcp_request(
+        &runtime,
+        rpc("tools/list", Some(json!(8102)), mcp_2026_params(json!({}))),
+        None,
+    )
+    .await;
+    let McpOutcome::Ok(value) = outcome else {
+        panic!("expected discovery");
+    };
+    let tools = value["result"]["tools"].as_array().unwrap();
+    for retired in [
+        "tool_manifest",
+        "runtime_status",
+        "apply_text_edits",
+        "session_handoff_summary",
+    ] {
+        assert!(!tools.iter().any(|tool| tool["name"] == retired));
+    }
+    let bootstrap = tools
+        .iter()
+        .find(|tool| tool["name"] == "work_on_project")
+        .unwrap();
+    for retired in [
+        "include_project_instructions",
+        "include_workflow_guidance",
+        "recording_session_id",
+    ] {
+        assert!(bootstrap["inputSchema"]["properties"]
+            .get(retired)
+            .is_none());
+    }
+    assert!(bootstrap["inputSchema"]["properties"].get("_wc").is_some());
+    for (name, arguments) in [
+        ("get_runtime_status", json!({"compact": true})),
+        ("read_tool_manifest", json!({"tool_name": "read_files"})),
+    ] {
+        let descriptor = tools.iter().find(|tool| tool["name"] == name).unwrap();
+        for key in arguments.as_object().unwrap().keys() {
+            assert!(descriptor["inputSchema"]["properties"].get(key).is_some());
+        }
+        let outcome = handle_mcp_request(
+            &runtime,
+            rpc(
+                "tools/call",
+                Some(json!(8103)),
+                mcp_2026_params(json!({"name": name, "arguments": arguments})),
+            ),
+            None,
+        )
+        .await;
+        let McpOutcome::Ok(value) = outcome else {
+            panic!("advertised callable failed: {name}");
+        };
+        assert_eq!(
+            value["result"]["structuredContent"]["success"], true,
+            "{name}: {value}"
+        );
+    }
+}
+
 async fn wait_for_mcp_agent_request(
     registry: &crate::runner_http::RunnerRegistry,
     client_id: &str,
