@@ -1,6 +1,7 @@
 //! Bounded metadata inventory derived from the unique authoritative Environment.
 //! No setup, locks, processes, network, traversal scans, payload backup or restore.
 mod configuration;
+mod diagnostic_configuration;
 mod entries;
 mod manifest;
 mod model;
@@ -11,6 +12,7 @@ pub use configuration::{
     append_runner_configuration_paths, append_server_configuration_paths, inspect_runner_locations,
     inspect_server_locations, RunnerLocations, ServerLocations,
 };
+pub use diagnostic_configuration::*;
 pub use manifest::build_backup_manifest;
 pub use model::*;
 pub use paths::local_path_entry;
@@ -43,6 +45,7 @@ pub fn empty_environment_inventory() -> PathInventory {
         issues: vec![],
         builds: vec![],
         identities: vec![],
+        diagnostic: DiagnosticObservation::default(),
     }
 }
 
@@ -53,7 +56,8 @@ pub(super) fn safe_identifier(value: &str) -> bool {
         && !webcodex_core::sensitive_text::secret_like_value(value)
 }
 
-/// Stable revision of the complete projection, excluding observation time. Desktop
+/// Stable revision of the serialized path projection, excluding observation time.
+/// Internal diagnostic observations do not revise location/manifest actions. Desktop
 /// calls this again after adding its own authoritative metadata. Not a capability.
 pub fn recompute_revision(inventory: &mut PathInventory) {
     // Public adapter additions share one bound. Fixed metadata callers can never

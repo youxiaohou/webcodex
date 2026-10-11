@@ -117,6 +117,17 @@ fn observation_does_not_create_state_or_export_private_desktop_values() {
     assert_eq!(log.kind, PathKind::InMemory);
     assert!(log.directory_to_open.is_none());
     assert!(!fixture.data.join("logs").exists());
+    for id in ["desktop.lifecycle_current", "desktop.lifecycle_previous"] {
+        let entry = inventory
+            .entries
+            .iter()
+            .find(|entry| entry.id == id)
+            .unwrap();
+        assert_eq!(entry.kind, PathKind::File);
+        assert_eq!(entry.status, PathStatus::Missing);
+        assert!(entry.directory_to_open.is_none());
+    }
+    assert!(!fixture.data.join(crate::lifecycle_log::DIRECTORY).exists());
 }
 
 #[test]
@@ -293,6 +304,69 @@ fn context_and_environment_changes_fence_old_actions() {
             .unwrap_err()
             .code,
         "inventory_changed"
+    );
+}
+
+#[test]
+fn diagnostic_configuration_uses_current_owned_preferences_without_revising_locations() {
+    use crate::desktop_locale::DesktopLocale;
+    let mut fixture = Fixture::new();
+    fixture.save_environment(false, true);
+    let before = fixture.observe();
+    fixture.config.update_cache.automatic_download =
+        !fixture.config.update_cache.automatic_download;
+    fixture.config.extra.insert(
+        "secret_extension".into(),
+        serde_json::json!({"token":"secret-canary"}),
+    );
+    let after = fixture.observe();
+    assert_eq!(after.revision, before.revision);
+
+    let mut configuration = build_diagnostic_configuration(&after);
+    configuration.desktop_preferences =
+        desktop_preferences(&fixture.config, false, DesktopLocale::ZhCn);
+    let output = serde_json::to_string(&configuration).unwrap();
+
+    assert_eq!(configuration.kind, "diagnostic_configuration");
+    assert_eq!(configuration.inventory_revision, before.revision);
+    assert_eq!(
+        configuration.desktop_preferences,
+        Setting::Known {
+            value: DesktopPreferences {
+                language: DiagnosticLanguage::ZhCn,
+                automatic_update_download: fixture.config.update_cache.automatic_download,
+            }
+        }
+    );
+    assert!(!output.contains("secret-canary"));
+}
+
+#[test]
+fn diagnostic_configuration_projects_all_supported_desktop_languages() {
+    use crate::desktop_locale::DesktopLocale;
+    let fixture = Fixture::new();
+    for (locale, language) in [
+        (DesktopLocale::EnUs, DiagnosticLanguage::EnUs),
+        (DesktopLocale::ZhCn, DiagnosticLanguage::ZhCn),
+        (DesktopLocale::ZhTw, DiagnosticLanguage::ZhTw),
+        (DesktopLocale::DeDe, DiagnosticLanguage::DeDe),
+        (DesktopLocale::FrFr, DiagnosticLanguage::FrFr),
+        (DesktopLocale::JaJp, DiagnosticLanguage::JaJp),
+        (DesktopLocale::KoKr, DiagnosticLanguage::KoKr),
+    ] {
+        assert_eq!(
+            desktop_preferences(&fixture.config, false, locale),
+            Setting::Known {
+                value: DesktopPreferences {
+                    language,
+                    automatic_update_download: fixture.config.update_cache.automatic_download,
+                }
+            }
+        );
+    }
+    assert_eq!(
+        desktop_preferences(&fixture.config, true, DesktopLocale::EnUs),
+        Setting::Unknown
     );
 }
 

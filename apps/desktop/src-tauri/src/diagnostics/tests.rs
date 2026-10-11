@@ -11,6 +11,30 @@ fn env_fixture(text: &str) -> PathBuf {
     file
 }
 
+fn diagnostic_configuration_fixture(
+) -> webcodex_environment::inventory::DiagnosticConfiguration {
+    serde_json::from_value(json!({
+        "schema_version": 1,
+        "kind": "diagnostic_configuration",
+        "cannot_restore": true,
+        "privacy_notice": "review before sharing",
+        "inventory_revision": "inventory-fence",
+        "environment": {
+            "environment_id": {"state":"known","value":"environment-safe"},
+            "local_server": {"state":"known","value":true},
+            "local_runner": {"state":"known","value":true},
+            "service_scope": {"state":"known","value":"user"},
+            "projects": {"state":"known","value":[]}
+        },
+        "device_display_name": {"state":"known","value":"Work laptop"},
+        "desktop_preferences": {
+            "state":"known",
+            "value":{"language":"en-US","automatic_update_download":false}
+        }
+    }))
+    .unwrap()
+}
+
 #[test]
 fn trace_mode_updates_are_atomic_allowlisted_and_keep_unknown_entries() {
     let path=env_fixture("# operator settings\r\nWEBCODEX_TOKEN=private-canary\r\nCUSTOM_SETTING='literal value'\r\nWEBCODEX_MCP_COMPACT_SCHEMAS=true\r\n");
@@ -166,7 +190,8 @@ fn report_and_bundle_include_only_explicit_safe_projections() {
         &activity.snapshot(),
         json!({"supported":false}),
     );
-    let bytes = support_zip(&value).unwrap();
+    let configuration = diagnostic_configuration_fixture();
+    let bytes = support_zip(&value, &configuration).unwrap();
     let text = String::from_utf8_lossy(&bytes);
     for private in [
         "private-token-canary",
@@ -181,6 +206,9 @@ fn report_and_bundle_include_only_explicit_safe_projections() {
     }
     assert!(text.contains("diagnostic-report.json"));
     assert!(text.contains("activity-safe.json"));
+    assert!(text.contains("diagnostic-configuration.json"));
+    assert!(text.contains("Work laptop"));
+    assert!(text.contains("environment-safe"));
     assert_eq!(&bytes[..4], &[0x50, 0x4b, 0x03, 0x04]);
     assert_eq!(
         &bytes[bytes.len() - 22..bytes.len() - 18],
@@ -195,9 +223,15 @@ fn report_and_bundle_include_only_explicit_safe_projections() {
 #[test]
 fn support_export_never_overwrites_existing_files() {
     let path = env_fixture("original").with_file_name("report.zip");
-    export_support(&path, &json!({"schema_version":1,"activity":[]})).unwrap();
+    let configuration = diagnostic_configuration_fixture();
+    export_support(
+        &path,
+        &json!({"schema_version":1,"activity":[]}),
+        &configuration,
+    )
+    .unwrap();
     let before = std::fs::read(&path).unwrap();
-    assert!(export_support(&path, &json!({"new":true})).is_err());
+    assert!(export_support(&path, &json!({"new":true}), &configuration).is_err());
     assert_eq!(std::fs::read(&path).unwrap(), before);
     std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
 }

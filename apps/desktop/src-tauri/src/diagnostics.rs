@@ -525,16 +525,22 @@ pub fn report_markdown(report: &Value) -> String {
 
 /// A deterministic ZIP containing a fixed set of bounded projections. It never
 /// walks a directory or reads any operator file for export.
-pub fn support_zip(report: &Value) -> DesktopResult<Vec<u8>> {
+pub fn support_zip(
+    report: &Value,
+    configuration: &webcodex_environment::inventory::DiagnosticConfiguration,
+) -> DesktopResult<Vec<u8>> {
     let json_bytes =
         serde_json::to_vec_pretty(report).map_err(|_| diagnostic_error("support_bundle_failed"))?;
     let markdown = report_markdown(report).into_bytes();
     let activity = serde_json::to_vec(&report["activity"])
         .map_err(|_| diagnostic_error("support_bundle_failed"))?;
+    let configuration = serde_json::to_vec_pretty(configuration)
+        .map_err(|_| diagnostic_error("support_bundle_failed"))?;
     let files = [
         ("diagnostic-report.json", json_bytes),
         ("diagnostic-report.md", markdown),
         ("activity-safe.json", activity),
+        ("diagnostic-configuration.json", configuration),
     ];
     let mut output = Vec::new();
     let mut central = Vec::new();
@@ -603,11 +609,15 @@ pub fn support_zip(report: &Value) -> DesktopResult<Vec<u8>> {
     Ok(output)
 }
 
-pub fn export_support(path: &Path, report: &Value) -> DesktopResult<()> {
+pub fn export_support(
+    path: &Path,
+    report: &Value,
+    configuration: &webcodex_environment::inventory::DiagnosticConfiguration,
+) -> DesktopResult<()> {
     if !path.is_absolute() || path.extension().and_then(|e| e.to_str()) != Some("zip") {
         return Err(diagnostic_error("support_bundle_path_invalid"));
     }
-    let bytes = support_zip(report)?;
+    let bytes = support_zip(report, configuration)?;
     // No silent overwrite of any existing file, including links. The native
     // chooser can select a fresh name; project files are never included.
     let mut options = std::fs::OpenOptions::new();

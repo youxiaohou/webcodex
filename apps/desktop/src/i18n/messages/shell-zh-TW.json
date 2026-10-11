@@ -170,7 +170,7 @@
   "Export Support Bundle": "匯出支援包",
   "Copied": "已複製",
   "Support bundle exported": "支援包已匯出",
-  "The report and support bundle exclude project code, credentials, configuration contents and full request/result payloads.": "報告與支援包不包含專案程式碼、憑據、設定檔案正文或完整請求／結果內容。",
+  "The copied report excludes configuration contents. The support bundle adds an allowlisted nonsecret diagnostic configuration snapshot that may include private local paths; review it before sharing. Credentials, raw configuration and project code remain excluded.": "複製的診斷報告不包含設定正文。支援包會額外加入經白名單篩選的非秘密診斷設定快照，其中可能包含私密本機路徑；分享前請先檢查。憑據、原始設定與專案程式碼仍會排除。",
   "Open app data directory": "開啟應用資料目錄",
   "Open Server configuration location": "開啟 Server 設定所在目錄",
   "Open trace directory": "開啟追蹤目錄",

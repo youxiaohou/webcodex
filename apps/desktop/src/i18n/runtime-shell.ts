@@ -92,7 +92,7 @@ const zh: Record<string, string> = {
   "Copy Runtime Console credential": "复制 Runtime Console 凭据", "Copy sensitive credential": "复制敏感凭据", "Sensitive clipboard action": "敏感剪贴板操作",
   "This copies the managed user credential to your clipboard. Do not share it; clipboard managers may retain it.": "将当前托管用户凭据复制到剪贴板。请勿分享；剪贴板管理器可能保留它。",
   "Copy Diagnostic Report": "复制诊断报告", "Export Support Bundle": "导出支持包", "Copied": "已复制", "Support bundle exported": "支持包已导出",
-  "The report and support bundle exclude project code, credentials, configuration contents and full request/result payloads.": "报告与支持包不包含项目代码、凭据、配置文件正文或完整请求／结果内容。",
+  "The copied report excludes configuration contents. The support bundle adds an allowlisted nonsecret diagnostic configuration snapshot that may include private local paths; review it before sharing. Credentials, raw configuration and project code remain excluded.": "复制的诊断报告不包含配置正文。支持包会额外加入经过白名单筛选的非秘密诊断配置快照，其中可能包含私密本地路径；分享前请检查。凭据、原始配置和项目代码仍会排除。",
   "Open app data directory": "打开应用数据目录", "Open Server configuration location": "打开 Server 配置所在目录", "Open trace directory": "打开追踪目录",
   "Configuration could not be migrated": "无法迁移配置", "Restore previous configuration": "恢复之前的配置", "Restore configuration": "恢复配置",
   "Restore the previous known-good configuration without deleting Projects or credentials. Runtime will remain stopped until explicitly started.": "恢复之前有效的配置，不删除项目或凭据。恢复后 Runtime 保持停止，需明确启动。",

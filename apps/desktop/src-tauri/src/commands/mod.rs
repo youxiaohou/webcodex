@@ -695,10 +695,19 @@ pub async fn copy_diagnostic_report(
 }
 
 #[tauri::command]
-pub async fn export_support_bundle(path: String, state: State<'_, AppState>) -> DesktopResult<()> {
+pub async fn export_support_bundle(
+    path: String,
+    state: State<'_, AppState>,
+    locale: State<'_, crate::desktop_locale::DesktopLocaleState>,
+) -> DesktopResult<()> {
     let report = state.diagnostics().await?.report;
+    let configuration = state.diagnostic_configuration(&locale).await?;
     tokio::task::spawn_blocking(move || {
-        crate::diagnostics::export_support(std::path::Path::new(&path), &report)
+        crate::diagnostics::export_support(
+            std::path::Path::new(&path),
+            &report,
+            &configuration,
+        )
     })
     .await
     .map_err(|_| crate::diagnostics::diagnostic_error("support_bundle_write_unconfirmed"))?

@@ -65,6 +65,14 @@ When upgrading an older installation across the 0.4 boundary, upgrade the first-
 
 The exact protocol-generation field names, baseline capability list, registration grammar, and compatibility-test matrix are maintainer/wire-contract details and are intentionally omitted from this operations guide.
 
+Streaming Runners register before gathering project Git metadata. The initial
+project catalog is scanned in one process-owned background worker, then sent
+through the usual acknowledged inventory pages. Registration, keepalive and
+shutdown remain responsive while a large or slow catalog is being inspected;
+project inventory can still be pending just after the Runner connects. Reconnects
+reuse an in-flight scan, and process shutdown cancels its Git probes through the
+existing owned-tree cleanup path.
+
 A ChatGPT Host message that the current conversation does not support developer
 MCPs is not a Runner heartbeat or reconnect result. If ChatGPT cannot dispatch
 `get_runtime_status`, first run `webcodex runner status` locally (and inspect bounded
@@ -290,6 +298,53 @@ Session-retained bodies. The instruction
 projection fits the remaining 20 KiB shared sidecar envelope by dropping derived
 headings before shortening text, preserving source identities and Project rules
 instead of discarding the entire material solely because global sources were added.
+
+## ACP coding agents: explicit startup environment
+
+ACP agents are configured at Runner startup and receive a cleared environment
+(`env_clear()`), followed only by explicit `env_from_env` mappings. For an
+already installed npm `codex-acp` adapter, use the absolute installed executable
+and explicitly opt into its runtime environment, for example:
+
+```toml
+[acp]
+max_concurrent_runs = 1
+
+[[acp.agents]]
+id = "codex"
+name = "Codex"
+executable = "/absolute/path/to/codex-acp"
+args = []
+env_from_env = { PATH = "PATH", HOME = "HOME" }
+```
+
+The Runner's own `PATH` must contain the real Node executable. Homebrew or NVM
+installations may live outside default executable search directories; mapping
+`PATH` cannot repair an incomplete Runner environment. Start Runner with the
+required environment and restart it after configuration or environment changes.
+The Desktop editor offers an explicit **Add missing PATH/HOME mappings** action;
+it adds names only when selected and preserves existing source mappings.
+
+`PATH` and `HOME` are a starting point, not a guarantee of a complete environment.
+Explicitly map `HOME` for the required user configuration/authentication state;
+map `CODEX_HOME` if using a custom Codex home, and proxy/certificate variables
+such as `HTTPS_PROXY`, `SSL_CERT_FILE`, or `NODE_EXTRA_CA_CERTS` only as needed.
+Each mapped source must exist in Runner's environment; a missing source fails
+before agent launch. Mapping private state or credentials delegates access to the
+configured agent. Values remain outside Desktop configuration and Server
+advertisements.
+
+The npm adapter normally uses its bundled Codex, which is distinct from a
+system `codex` command. To select another Codex with `CODEX_PATH`, explicitly
+map `CODEX_PATH = "CODEX_PATH"` and provide that source in Runner's environment.
+
+A Linux equivalent reproduction with `codex-acp` **2.1.1** and its bundled Codex
+**0.159.3** exited with status **127** before ACP `initialize` when `PATH` was
+absent; explicitly mapping a Runner `PATH` containing Node allowed
+initialization. This does not establish the original reporter's environment or
+validate macOS; it is not evidence that every startup failure is resolved.
+See the [ACP run contract](agent/acp-coding-agent-run.md#6-runner-owned-acp-provider-configuration)
+for lifecycle and configuration boundaries.
 
 ## Local MCP providers
 

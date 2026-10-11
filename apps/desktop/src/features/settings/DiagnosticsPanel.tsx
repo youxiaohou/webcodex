@@ -95,7 +95,7 @@ export function DiagnosticsPanel({ state, onState, onActivity, onRuntime, onConn
         <button type="button" className="secondary-button" disabled={disabled || !data.configuration.backup_available || !data.configuration.primary_fingerprint} onClick={() => setConfirmation({ kind: "restore" })}>{s("Restore previous configuration")}</button>
       </section>}
       <div className="shell-subsection diagnostics-support"><h3>{p("supportHelp")}</h3><p>{p("supportPurpose")}</p>
-        <p className="field-help">{s("The report and support bundle exclude project code, credentials, configuration contents and full request/result payloads.")}</p>
+        <p className="field-help">{s("The copied report excludes configuration contents. The support bundle adds an allowlisted nonsecret diagnostic configuration snapshot that may include private local paths; review it before sharing. Credentials, raw configuration and project code remain excluded.")}</p>
         <div className="shell-actions"><button type="button" className="secondary-button" disabled={disabled} onClick={() => void act(async () => { await desktopApi.copyDiagnosticReport(); if (alive.current) setNotice("Copied"); })}>{s("Copy Diagnostic Report")}</button>
           <button type="button" className="secondary-button" disabled={disabled} onClick={() => void act(async () => {
             const path = await save({ title: s("Export Support Bundle"), defaultPath: "webcodex-support.zip", filters: [{ name: "ZIP", extensions: ["zip"] }] });

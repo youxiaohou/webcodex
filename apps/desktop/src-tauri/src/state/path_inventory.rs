@@ -5,9 +5,10 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use webcodex_environment::inventory::{
     append_runner_configuration_paths, append_server_configuration_paths, build_backup_manifest,
-    empty_environment_inventory, inspect_environment_paths, local_path_entry, recompute_revision,
-    safe_build, BuildObservation, BuildSource, InventoryIssue, LogSource, LogSourceKind, PathEntry,
-    PathInventory, PathKind, PathStatus, SafetyCategory,
+    build_diagnostic_configuration, empty_environment_inventory, inspect_environment_paths,
+    local_path_entry, recompute_revision, safe_build, BuildObservation, BuildSource,
+    DesktopPreferences, DiagnosticConfiguration, InventoryIssue, LogSource, LogSourceKind,
+    PathEntry, PathInventory, PathKind, PathStatus, SafetyCategory, Setting, DiagnosticLanguage,
 };
 
 mod export;
@@ -91,6 +92,27 @@ impl AppState {
             }
         };
         export::write_document(&request.path, &bytes, &inventory)
+    }
+
+    pub async fn diagnostic_configuration(
+        &self,
+        locale: &crate::desktop_locale::DesktopLocaleState,
+    ) -> DesktopResult<DiagnosticConfiguration> {
+        let slot = self.core.lock().await;
+        let core = slot
+            .as_ref()
+            .ok_or_else(|| inventory_error("desktop_operation_busy"))?;
+        let root =
+            webcodex_environment::default_environment_dir().map_err(environment::desktop_error)?;
+        let inventory = desktop_inventory(core, &root, self.desktop_data_dir.source.label());
+        let mut configuration = build_diagnostic_configuration(&inventory);
+        configuration.desktop_preferences = desktop_preferences(
+            &core.config,
+            core.configuration_issue.is_some(),
+            locale.get(),
+        );
+        export::bounded_json(&configuration)?;
+        Ok(configuration)
     }
 }
 
@@ -276,6 +298,29 @@ fn collect_inventory(core: &InventoryContext<'_>, root: &Path, source: &str) -> 
         PathStatus::Present,
         SafetyCategory::Log,
     ));
+    for (id, file) in [
+        ("desktop.lifecycle_current", crate::lifecycle_log::CURRENT),
+        ("desktop.lifecycle_previous", crate::lifecycle_log::PREVIOUS),
+    ] {
+        let mut location = entry(
+            id,
+            "desktop",
+            "desktop_lifecycle_log",
+            "desktop_state",
+            &core
+                .data_dir
+                .join(crate::lifecycle_log::DIRECTORY)
+                .join(file),
+            PathKind::File,
+            SafetyCategory::Log,
+        );
+        location.log_source = Some(LogSource {
+            kind: LogSourceKind::LifecycleFile,
+            unit_name: None,
+            service_scope: None,
+        });
+        inventory.entries.push(location);
+    }
     inventory.entries.push(reference(
         "desktop.process_output",
         "desktop",
@@ -402,6 +447,7 @@ fn append_legacy_locations(inventory: &mut PathInventory, core: &InventoryContex
             }
         }
     } else {
+        inventory.diagnostic.device_display_name = Setting::NotApplicable;
         inventory.entries.push(reference(
             "runner.configuration",
             "runner",
@@ -422,8 +468,38 @@ fn append_legacy_locations(inventory: &mut PathInventory, core: &InventoryContex
             SafetyCategory::Secret,
         ));
     }
-    // Legacy Desktop children retain output in memory. Do not manufacture
-    // persistent lifecycle logs for processes not managed as OS services.
+    // Legacy child stdout/stderr remain in memory; the separately listed
+    // Desktop lifecycle files contain only typed ownership/exit metadata.
+}
+
+fn desktop_preferences(
+    config: &StoredDesktopConfig,
+    configuration_issue: bool,
+    locale: crate::desktop_locale::DesktopLocale,
+) -> Setting<DesktopPreferences> {
+    if configuration_issue {
+        Setting::Unknown
+    } else {
+        Setting::Known {
+            value: DesktopPreferences {
+                language: settings_language(locale),
+                automatic_update_download: config.update_cache.automatic_download,
+            },
+        }
+    }
+}
+
+fn settings_language(locale: crate::desktop_locale::DesktopLocale) -> DiagnosticLanguage {
+    use crate::desktop_locale::DesktopLocale;
+    match locale {
+        DesktopLocale::EnUs => DiagnosticLanguage::EnUs,
+        DesktopLocale::ZhCn => DiagnosticLanguage::ZhCn,
+        DesktopLocale::ZhTw => DiagnosticLanguage::ZhTw,
+        DesktopLocale::DeDe => DiagnosticLanguage::DeDe,
+        DesktopLocale::FrFr => DiagnosticLanguage::FrFr,
+        DesktopLocale::JaJp => DiagnosticLanguage::JaJp,
+        DesktopLocale::KoKr => DiagnosticLanguage::KoKr,
+    }
 }
 
 #[cfg(test)]
