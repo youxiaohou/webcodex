@@ -123,10 +123,8 @@ impl RuntimeSurface {
             agent_continuation_app_admitted && is_agent_continuation_app_tool_name(&params.name);
         let app_only_job_terminal_continuation = job_terminal_continuation_app_admitted
             && is_job_terminal_continuation_app_tool_name(&params.name);
-        let protocol_extension_admitted = stateless_2026
-            && crate::tool_runtime::stateless_operator_extension_tool_specs()
-                .iter()
-                .any(|spec| spec.name == params.name);
+        let protocol_extension_admitted =
+            stateless_2026 && runtime_tool_operator_extension_family(&params.name).is_some();
         let workbench_view_call = server_mcp_apps_enabled
             && stateless_2026
             && matches!(

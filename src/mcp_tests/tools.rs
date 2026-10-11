@@ -1,5 +1,47 @@
 use super::*;
 
+#[test]
+fn mcp_extension_route_lookup_preserves_membership_without_schema_materialization() {
+    use webcodex_tool_contracts::registry::{
+        stateless_operator_extension_tool_specs, take_tool_materialization_counts_for_test,
+    };
+    use webcodex_tool_contracts::{
+        runtime_tool_operator_extension_family, tool_definition::tool_definitions,
+    };
+    let names = stateless_operator_extension_tool_specs()
+        .into_iter()
+        .map(|spec| spec.name)
+        .collect::<std::collections::BTreeSet<_>>();
+    for definition in tool_definitions() {
+        assert_eq!(
+            runtime_tool_operator_extension_family(definition.name).is_some(),
+            names.contains(definition.name),
+            "{}",
+            definition.name
+        );
+    }
+    take_tool_materialization_counts_for_test();
+    for name in names
+        .iter()
+        .map(String::as_str)
+        .chain(["read_files", "unknown-tool"])
+    {
+        let ordinary =
+            crate::mcp::tools::adaptive_runtime_gateway_target_admitted_for_test(name, false);
+        let modern =
+            crate::mcp::tools::adaptive_runtime_gateway_target_admitted_for_test(name, true);
+        if names.contains(name) {
+            assert!(!ordinary);
+            assert!(modern);
+        }
+        if name == "unknown-tool" {
+            assert!(!ordinary);
+            assert!(!modern);
+        }
+    }
+    assert_eq!(take_tool_materialization_counts_for_test(), (0, 0));
+}
+
 #[tokio::test]
 async fn mcp_route_recovery_rejects_unavailable_tools_without_gateway_retry() {
     let runtime = test_runtime_with_mcp_settings(true, false);
