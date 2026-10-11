@@ -282,20 +282,24 @@ class AgentLoopBenchmarkTests(unittest.TestCase):
             (fixture / "alpha.txt").write_text(
                 "BENCH_TARGET_ALPHA=before\nALPHA_UNRELATED_SENTINEL=keep\n",
                 encoding="utf-8",
+                newline="\n",
             )
             (fixture / "beta.txt").write_text(
                 "BENCH_TARGET_BETA=before\nBETA_UNRELATED_SENTINEL=keep\n",
                 encoding="utf-8",
+                newline="\n",
             )
             subprocess.run(["git", "add", "."], cwd=root, check=True)
             subprocess.run(["git", "commit", "-m", "fixture"], cwd=root, check=True, stdout=subprocess.DEVNULL)
             (fixture / "alpha.txt").write_text(
                 "BENCH_TARGET_ALPHA=after\nALPHA_UNRELATED_SENTINEL=keep\n",
                 encoding="utf-8",
+                newline="\n",
             )
             (fixture / "beta.txt").write_text(
                 "BENCH_TARGET_BETA=after\nBETA_UNRELATED_SENTINEL=keep\n",
                 encoding="utf-8",
+                newline="\n",
             )
             result = benchmark._fixture_oracle(case, root)
             self.assertTrue(result["available"])
@@ -308,6 +312,7 @@ class AgentLoopBenchmarkTests(unittest.TestCase):
             (fixture / "beta.txt").write_text(
                 "BENCH_TARGET_BETA=after\nBETA_UNRELATED_SENTINEL=lost\n",
                 encoding="utf-8",
+                newline="\n",
             )
             result = benchmark._fixture_oracle(case, root)
             self.assertFalse(result["passed"])
@@ -315,6 +320,7 @@ class AgentLoopBenchmarkTests(unittest.TestCase):
             (fixture / "beta.txt").write_text(
                 "BENCH_TARGET_BETA=after\nBETA_UNRELATED_SENTINEL=keep\n",
                 encoding="utf-8",
+                newline="\n",
             )
             (root / "unexpected.txt").write_text("unexpected\n", encoding="utf-8")
             result = benchmark._fixture_oracle(case, root)
@@ -576,6 +582,7 @@ class AgentLoopBenchmarkTests(unittest.TestCase):
             self.assertEqual(changed["reason"], "changed path listing exceeds oracle limit")
             self.assertIsNone(changed["actual"])
 
+    @unittest.skipIf(os.name == "nt", "paired Host driver requires POSIX process-group ownership")
     def test_missing_receipts_are_retained_as_failed_samples(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -751,6 +758,7 @@ class AgentLoopBenchmarkTests(unittest.TestCase):
             with self.assertRaisesRegex(benchmark.BenchmarkError, "1 MiB"):
                 benchmark._read_manifest_at_revision(root, base)
 
+    @unittest.skipIf(os.name == "nt", "paired Host driver requires POSIX process-group ownership")
     def test_case_manifest_is_pinned_to_base_revision(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -909,6 +917,7 @@ class AgentLoopBenchmarkTests(unittest.TestCase):
                 )
             self.assertFalse(marker.exists())
 
+    @unittest.skipIf(os.name == "nt", "paired Host driver requires POSIX process-group ownership")
     def test_run_sample_clears_stale_receipt_before_driver(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -984,6 +993,7 @@ class AgentLoopBenchmarkTests(unittest.TestCase):
             self.assertEqual(sample["reason_code"], "driver_timeout")
             self.assertIsNone(sample["driver_exit_code"])
 
+    @unittest.skipIf(os.name == "nt", "paired Host driver requires POSIX process-group ownership")
     def test_contract_error_preserves_driver_exit_code(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1025,6 +1035,7 @@ class AgentLoopBenchmarkTests(unittest.TestCase):
             self.assertEqual(sample["reason_code"], "sample_contract_error")
             self.assertEqual(sample["driver_exit_code"], 7)
 
+    @unittest.skipIf(os.name == "nt", "paired Host driver requires POSIX process-group ownership")
     def test_fallback_task_timing_starts_after_worktree_setup(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
