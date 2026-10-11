@@ -142,7 +142,7 @@ fn mcp_adaptive_runtime_gateway_target_route(
     use crate::model_surface::AdaptiveRuntimeGatewayTargetRoute;
 
     if stateless_2026
-        && crate::tool_runtime::stateless_operator_extension_tool_specs()
+        && webcodex_tool_contracts::registry::stateless_operator_extension_tool_descriptors()
             .iter()
             .any(|spec| spec.name == target)
     {
@@ -193,7 +193,7 @@ fn mcp_suggested_tool_call_route(target: &str, stateless_2026: bool) -> Suggeste
         return SuggestedToolCallRoute::Gateway(ADAPTIVE_RUNTIME_GATEWAY_TOOL_NAME);
     }
     let operator_extension_admitted = stateless_2026
-        && crate::tool_runtime::stateless_operator_extension_tool_specs()
+        && webcodex_tool_contracts::registry::stateless_operator_extension_tool_descriptors()
             .iter()
             .any(|spec| spec.name == target);
     crate::model_surface::suggested_tool_call_route(target, operator_extension_admitted)
@@ -2874,7 +2874,7 @@ pub(super) async fn handle_call(
     let app_only_job_terminal_continuation = job_terminal_continuation_app_admitted
         && is_job_terminal_continuation_app_tool_name(&params.name);
     let protocol_extension_admitted = stateless_2026
-        && crate::tool_runtime::stateless_operator_extension_tool_specs()
+        && webcodex_tool_contracts::registry::stateless_operator_extension_tool_descriptors()
             .iter()
             .any(|spec| spec.name == params.name);
     let workbench_view_call = server_mcp_apps_enabled
