@@ -476,20 +476,20 @@ fn apply_output_budget(
 ) -> Value {
     let result_budget = normalized_result_budget(max_result_bytes);
     let payload_budget = result_budget.saturating_sub(MODEL_RESULT_ENVELOPE_RESERVE_BYTES);
-    let complete = batch_output(
-        project,
-        requested_count,
-        completed.clone(),
-        false,
-        None,
-        None,
-    );
+    // Own the canonical batch while measuring the final model projection.
+    // The common complete-fit path can return it without cloning every read
+    // body; on truncation, move its items into the existing budgeting loop.
+    let mut complete = batch_output(project, requested_count, completed, false, None, None);
     // Budget the shape the model would actually receive after the existing
     // sparse projection. The canonical representation remains available for
     // Session recording and for any partial-item cursor construction below.
     if projected_batch_serialized_len(&complete, projection) <= payload_budget {
         return complete;
     }
+    let completed = complete["items"]
+        .as_array_mut()
+        .map(std::mem::take)
+        .expect("batch_output always contains the canonical read items");
 
     let truncation_reason = if result_budget == MAX_SERIALIZED_OUTPUT_BYTES {
         "hard_result_cap"
@@ -630,7 +630,15 @@ pub(crate) fn apply_model_facing_output_budget(
     else {
         return;
     };
-    let Some(completed) = output.get("items").and_then(Value::as_array).cloned() else {
+    // All metadata has been validated; the original read bodies are no longer
+    // needed separately after budgeting. Keep the surrounding result metadata
+    // while transferring item ownership instead of cloning potentially 512 KiB.
+    let Some(completed) = result
+        .output
+        .get_mut("items")
+        .and_then(Value::as_array_mut)
+        .map(std::mem::take)
+    else {
         return;
     };
 
@@ -657,9 +665,11 @@ pub(crate) fn apply_model_facing_output_budget(
     ] {
         root.remove(key);
     }
-    if let Some(budgeted) = budgeted.as_object() {
+    // Merge the owned budget result back into the original envelope to retain
+    // any independent Session/context overlays, with no second item copy.
+    if let Value::Object(budgeted) = budgeted {
         for (key, value) in budgeted {
-            root.insert(key.clone(), value.clone());
+            root.insert(key, value);
         }
     }
 }
@@ -1291,6 +1301,110 @@ mod tests {
             },
             "error": null
         })
+    }
+
+    #[test]
+    fn owned_budget_merge_preserves_overlays_and_continuations() {
+        let metadata = json!({
+            "session_hint": {"open_counts": {"todo": 2}},
+            "job_attention": {"items": [{"state": "terminal", "outcome": "passed"}]},
+            "future_metadata": {"value": "opaque", "count": 7}
+        });
+        let partial_lines = (0..900)
+            .map(|index| format!("第{index:04}行-{}", "界".repeat(40)))
+            .collect::<Vec<_>>();
+        let failed = json!({
+            "index": 1,
+            "path": "src/1.rs",
+            "success": false,
+            "output": {"reason_code": "not_file"},
+            "error": "read_file failed: not_file"
+        });
+
+        for (items, budget) in [
+            (
+                vec![
+                    default_complete_item(0, &["alpha\n\t界".to_string()]),
+                    default_complete_item(1, &["beta".to_string()]),
+                ],
+                None,
+            ),
+            (vec![ranged_item(0, 11, &partial_lines)], None),
+            (
+                vec![
+                    default_complete_item(0, &["x".repeat(140 * 1024)]),
+                    failed,
+                    default_complete_item(2, &["y".repeat(140 * 1024)]),
+                ],
+                Some(256 * 1024),
+            ),
+        ] {
+            let count = items.len();
+            let projection = batch_projection(count, budget);
+            let mut expected = ToolResult::ok(apply_output_budget(
+                "agent:oe:demo",
+                count,
+                items.clone(),
+                budget,
+                &projection,
+            ));
+            let mut actual = ToolResult::ok(batch_output(
+                "agent:oe:demo",
+                count,
+                items,
+                false,
+                None,
+                None,
+            ));
+            for (key, value) in metadata.as_object().unwrap() {
+                actual.output[key] = value.clone();
+                expected.output[key] = value.clone();
+            }
+
+            apply_model_facing_output_budget(&mut actual, budget, &projection);
+            assert_eq!(
+                serde_json::to_value(&actual).unwrap(),
+                serde_json::to_value(&expected).unwrap(),
+                "moving owned items must preserve all canonical fields and overlays"
+            );
+            add_actionable_read_continuations(&projection, &mut actual);
+            add_actionable_read_continuations(&projection, &mut expected);
+            super::super::result_projection::sparsify_complete_read_success(
+                "read_files",
+                &mut actual,
+            );
+            super::super::result_projection::sparsify_complete_read_success(
+                "read_files",
+                &mut expected,
+            );
+            assert_eq!(
+                serde_json::to_value(&actual).unwrap(),
+                serde_json::to_value(&expected).unwrap(),
+                "continuation and sparse model projection must be unchanged"
+            );
+        }
+    }
+
+    #[test]
+    fn owned_budget_guard_preserves_invalid_or_failed_result_without_mutation() {
+        for mut result in [
+            ToolResult::ok(json!({"project": "demo", "requested_count": 1})),
+            ToolResult::ok(json!({"requested_count": 1, "items": []})),
+            ToolResult::ok(json!({"project": "demo", "items": []})),
+            ToolResult::ok(json!({"project": "demo", "requested_count": 1, "items": "invalid"})),
+            ToolResult::err_with_output(
+                "read_files failed",
+                json!({"project": "demo", "requested_count": 1, "items": []}),
+            ),
+        ] {
+            let before = serde_json::to_value(&result).unwrap();
+            apply_model_facing_output_budget(&mut result, None, &batch_projection(1, None));
+            assert_eq!(
+                serde_json::to_value(&result).unwrap(),
+                before,
+                "invalid or failed results cannot lose items or metadata"
+            );
+        }
     }
 
     #[test]
