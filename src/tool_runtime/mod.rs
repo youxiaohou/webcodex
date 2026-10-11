@@ -206,9 +206,9 @@ pub(crate) use project_resolution::{runner_project_runtime_id, ProjectResolverEr
 #[cfg(test)]
 pub(crate) use registry::{
     goal_plan_app_tool_specs, memory_management_tool_specs, memory_runtime_tool_specs,
-    skill_management_tool_specs, work_result_app_tool_specs,
+    registered_tool_specs, skill_management_tool_specs, stateless_operator_extension_tool_specs,
+    work_result_app_tool_specs,
 };
-pub(crate) use registry::{registered_tool_specs, stateless_operator_extension_tool_specs};
 pub(crate) use session_context::{add_session_hint, unknown_session_result};
 pub(crate) use session_shell::SessionShellRegistry;
 #[cfg(test)]
