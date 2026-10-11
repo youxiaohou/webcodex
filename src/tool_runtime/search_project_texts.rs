@@ -3,7 +3,7 @@
 use super::files::{SearchOptions, SearchRequest};
 use super::project_resolution::ResolvedProject;
 use super::{SearchProjectTextsQuery, SuggestedToolCall, ToolResult, ToolRuntime};
-use crate::json_measurement::{serialized_json_len, serialized_json_string_len};
+use crate::json_measurement::serialized_json_len;
 use futures_util::{stream, StreamExt};
 use serde_json::{json, Value};
 use std::time::Duration;
@@ -143,165 +143,13 @@ fn serialized_value_len(value: &Value) -> usize {
     serialized_json_len(value).unwrap_or(usize::MAX)
 }
 
-/// Replace only canonical match-preview strings in a temporary search item.
-/// Result content itself remains borrowed; all other metadata and unknown
-/// fields are cloned without interpretation. This changes sizing only.
-fn cloned_search_item_without_previews<'a>(item: &'a Value) -> (Value, Vec<(usize, &'a str)>) {
-    let Some(fields) = item.as_object() else {
-        return (item.clone(), Vec::new());
-    };
-    let Some(output) = fields.get("output").and_then(Value::as_object) else {
-        return (item.clone(), Vec::new());
-    };
-    let Some(matches) = output.get("matches").and_then(Value::as_array) else {
-        return (item.clone(), Vec::new());
-    };
-    let mut previews = Vec::new();
-    let compact_matches = matches
-        .iter()
-        .enumerate()
-        .map(|(index, value)| {
-            let Some(item) = value.as_object() else {
-                return value.clone();
-            };
-            let Some(preview) = item.get("preview").and_then(Value::as_str) else {
-                return value.clone();
-            };
-            previews.push((index, preview));
-            let mut fields = serde_json::Map::new();
-            for (key, value) in item {
-                fields.insert(
-                    key.clone(),
-                    if key == "preview" {
-                        json!("")
-                    } else {
-                        value.clone()
-                    },
-                );
-            }
-            Value::Object(fields)
-        })
-        .collect::<Vec<_>>();
-
-    let mut output_clone = serde_json::Map::new();
-    for (key, value) in output {
-        if key != "matches" {
-            output_clone.insert(key.clone(), value.clone());
-        }
-    }
-    output_clone.insert("matches".to_string(), Value::Array(compact_matches));
-    let mut item_clone = serde_json::Map::new();
-    for (key, value) in fields {
-        if key != "output" {
-            item_clone.insert(key.clone(), value.clone());
-        }
-    }
-    item_clone.insert("output".to_string(), Value::Object(output_clone));
-    (Value::Object(item_clone), previews)
-}
-
-fn cloned_search_batch_without_previews<'a>(
-    output: &'a Value,
-) -> (Value, Vec<(usize, usize, &'a str)>) {
-    let Some(root) = output.as_object() else {
-        return (output.clone(), Vec::new());
-    };
-    let Some(items) = root.get("items").and_then(Value::as_array) else {
-        return (output.clone(), Vec::new());
-    };
-    let mut previews = Vec::new();
-    let items = items
-        .iter()
-        .enumerate()
-        .map(|(item_index, item)| {
-            let (metadata, item_previews) = cloned_search_item_without_previews(item);
-            previews.extend(
-                item_previews
-                    .into_iter()
-                    .map(|(match_index, preview)| (item_index, match_index, preview)),
-            );
-            metadata
-        })
-        .collect::<Vec<_>>();
-    let mut root_clone = serde_json::Map::new();
-    for (key, value) in root {
-        if key != "items" {
-            root_clone.insert(key.clone(), value.clone());
-        }
-    }
-    root_clone.insert("items".to_string(), Value::Array(items));
-    (Value::Object(root_clone), previews)
-}
-
-// One exact model-facing measurement, with or without a parser-ready query
-// continuation. The native search preview strings are not needed to decide
-// sparse metadata, but their escaped UTF-8 bytes must still count precisely.
-fn projected_search_batch_json_size(
-    output: &Value,
-    default_timeouts: &[bool],
-    continuation: Option<(
-        &str,
-        &[SearchProjectTextsQuery],
-        Option<&str>,
-        Option<usize>,
-    )>,
-) -> usize {
-    let (compact, previews) = cloned_search_batch_without_previews(output);
-    let mut projected = ToolResult::ok(compact);
+fn projected_batch_serialized_len(output: &Value, default_timeouts: &[bool]) -> usize {
+    let mut projected = ToolResult::ok(output.clone());
     super::result_projection::sparsify_search_batch_success_for_model(
         default_timeouts,
         &mut projected,
     );
-    if let Some((project, original_queries, session_id, max_result_bytes)) = continuation {
-        add_actionable_search_continuation(
-            &mut projected,
-            project,
-            original_queries,
-            session_id,
-            max_result_bytes,
-        );
-    }
-    if previews.iter().any(|(item_index, match_index, _)| {
-        projected.output["items"][*item_index]["output"]["matches"][*match_index]["preview"]
-            .as_str()
-            != Some("")
-    }) {
-        // Structural projection contracts can evolve independently. If any
-        // placeholder was removed or transformed, reuse the canonical result
-        // rather than undercount an unrecognized wire shape.
-        let mut original = ToolResult::ok(output.clone());
-        super::result_projection::sparsify_search_batch_success_for_model(
-            default_timeouts,
-            &mut original,
-        );
-        if let Some((project, original_queries, session_id, max_result_bytes)) = continuation {
-            add_actionable_search_continuation(
-                &mut original,
-                project,
-                original_queries,
-                session_id,
-                max_result_bytes,
-            );
-        }
-        return serialized_json_len(&original).unwrap_or(usize::MAX);
-    }
-    let Some(mut size) = serialized_json_len(&projected).ok() else {
-        return usize::MAX;
-    };
-    for (_, _, preview) in previews {
-        let Some(encoded) = serialized_json_string_len(preview) else {
-            return usize::MAX;
-        };
-        let Some(next) = size.checked_add(encoded.saturating_sub(2)) else {
-            return usize::MAX;
-        };
-        size = next;
-    }
-    size
-}
-
-fn projected_batch_serialized_len(output: &Value, default_timeouts: &[bool]) -> usize {
-    projected_search_batch_json_size(output, default_timeouts, None)
+    serialized_json_len(&projected).unwrap_or(usize::MAX)
 }
 
 fn projected_batch_serialized_len_with_continuation(
@@ -312,16 +160,23 @@ fn projected_batch_serialized_len_with_continuation(
     session_id: Option<&str>,
     max_result_bytes: Option<usize>,
 ) -> usize {
-    projected_search_batch_json_size(
-        output,
+    let mut projected = ToolResult::ok(output.clone());
+    super::result_projection::sparsify_search_batch_success_for_model(
         default_timeouts,
-        Some((project, original_queries, session_id, max_result_bytes)),
-    )
+        &mut projected,
+    );
+    add_actionable_search_continuation(
+        &mut projected,
+        project,
+        original_queries,
+        session_id,
+        max_result_bytes,
+    );
+    serialized_json_len(&projected).unwrap_or(usize::MAX)
 }
 
 fn projected_search_item_len(item: &Value, default_timeout: bool) -> usize {
-    let (compact, previews) = cloned_search_item_without_previews(item);
-    let mut projected = compact;
+    let mut projected = item.clone();
     if projected["success"].as_bool() == Some(true) {
         if let Some(output) = projected.get_mut("output").and_then(Value::as_object_mut) {
             super::result_projection::sparsify_search_output_for_model(
@@ -331,34 +186,7 @@ fn projected_search_item_len(item: &Value, default_timeout: bool) -> usize {
             );
         }
     }
-    if previews.iter().any(|(match_index, _)| {
-        projected["output"]["matches"][*match_index]["preview"].as_str() != Some("")
-    }) {
-        let mut original = item.clone();
-        if original["success"].as_bool() == Some(true) {
-            if let Some(output) = original.get_mut("output").and_then(Value::as_object_mut) {
-                super::result_projection::sparsify_search_output_for_model(
-                    output,
-                    default_timeout,
-                    true,
-                );
-            }
-        }
-        return serialized_value_len(&original);
-    }
-    let Some(mut size) = serialized_json_len(&projected).ok() else {
-        return usize::MAX;
-    };
-    for (_, preview) in previews {
-        let Some(encoded) = serialized_json_string_len(preview) else {
-            return usize::MAX;
-        };
-        let Some(next) = size.checked_add(encoded.saturating_sub(2)) else {
-            return usize::MAX;
-        };
-        size = next;
-    }
-    size
+    serialized_value_len(&projected)
 }
 
 fn projected_batch_len(base_len: usize, item_bytes: usize, item_count: usize) -> usize {
@@ -1653,138 +1481,6 @@ mod tests {
         if let Some(budgeted) = budgeted.as_object() {
             for (key, value) in budgeted {
                 root.insert(key.clone(), value.clone());
-            }
-        }
-    }
-
-    fn frozen_projected_search_batch_len(
-        output: &Value,
-        default_timeouts: &[bool],
-        continuation: Option<(
-            &str,
-            &[SearchProjectTextsQuery],
-            Option<&str>,
-            Option<usize>,
-        )>,
-    ) -> usize {
-        let mut result = ToolResult::ok(output.clone());
-        super::super::result_projection::sparsify_search_batch_success_for_model(
-            default_timeouts,
-            &mut result,
-        );
-        if let Some((project, queries, session_id, budget)) = continuation {
-            add_actionable_search_continuation(&mut result, project, queries, session_id, budget);
-        }
-        serialized_json_len(&result).unwrap_or(usize::MAX)
-    }
-
-    fn frozen_projected_search_item_len(item: &Value, default_timeout: bool) -> usize {
-        let mut projected = item.clone();
-        if projected["success"].as_bool() == Some(true) {
-            if let Some(output) = projected.get_mut("output").and_then(Value::as_object_mut) {
-                super::super::result_projection::sparsify_search_output_for_model(
-                    output,
-                    default_timeout,
-                    true,
-                );
-            }
-        }
-        serialized_value_len(&projected)
-    }
-
-    #[test]
-    fn projected_search_preview_lengths_match_canonical_json_and_continuations() {
-        let preview_shapes = [
-            String::new(),
-            "plain ASCII".to_string(),
-            "双字节? café 🍜".to_string(),
-            "\" \\ \n \t \r \u{0001} \u{001f}".to_string(),
-            "\u{2028}unicode\u{2029}".to_string(),
-            "界🦀".repeat(2400),
-            "\\quote\\\n".repeat(8000),
-            "x".repeat(128 * 1024),
-        ];
-        let mut cases = Vec::new();
-        for preview in preview_shapes {
-            let mut default = default_matches_item(0, 1, 12);
-            default["output"]["matches"][0]["preview"] = json!(preview);
-            default["output"]["matches"][0]["context_before"] = json!([{
-                "line": 1, "text": "not a preview, left unchanged"
-            }]);
-            default["output"]["matches"][0]["context_after"] = json!(["界 🦀 line"]);
-            cases.push(vec![default]);
-        }
-        cases.push(vec![
-            default_matches_item(0, 40, 300),
-            default_matches_item(1, 8, 1000),
-            files_item(2, 18),
-            count_item(3, 2),
-        ]);
-        cases.push(vec![
-            matches_item(0, 3, 400),
-            json!({"index": 1, "success": false, "output": null, "error": "failed"}),
-            json!({"index": 2, "success": true, "output": {
-                "backend": "other", "result_mode": "matches", "matches": [
-                    {"preview": ["not a string"], "path": "src/x"},
-                    null, {"preview": "", "unknown": true}
-                ], "count": 3, "truncated": true
-            }, "error": null}),
-        ]);
-        cases.push(vec![json!({"index": 0, "success": true, "output": null})]);
-        cases.push(Vec::new());
-
-        for (case_id, items) in cases.into_iter().enumerate() {
-            let count = items.len();
-            let defaults = (0..count).map(|index| index % 2 == 0).collect::<Vec<_>>();
-            let queries = (0..count)
-                .map(|index| test_query(index, None))
-                .collect::<Vec<_>>();
-            for (index, item) in items.iter().enumerate() {
-                for default_timeout in [true, false] {
-                    assert_eq!(
-                        projected_search_item_len(item, default_timeout),
-                        frozen_projected_search_item_len(item, default_timeout),
-                        "case {case_id}, item {index}: projected item length must match"
-                    );
-                }
-            }
-            for truncated in [false, true] {
-                let mut output = batch_output(
-                    "agent:oe:demo",
-                    count,
-                    items.clone(),
-                    truncated,
-                    truncated.then_some(0),
-                    truncated.then_some("batch_response_budget"),
-                );
-                output["session_hint"] = json!({"todo": 3, "important": "context"});
-                output["unknown"] = json!({"special": "\\", "unicode": "界🦀"});
-                let snapshot = output.clone();
-                for budget in [None, Some(0), Some(256 * 1024)] {
-                    let context = Some((
-                        "agent:oe:demo",
-                        queries.as_slice(),
-                        Some("wc_sess_read_check"),
-                        budget,
-                    ));
-                    assert_eq!(
-                        projected_batch_serialized_len(&output, &defaults),
-                        frozen_projected_search_batch_len(&output, &defaults, None),
-                        "case {case_id}: complete sparse projection must match canonical bytes"
-                    );
-                    assert_eq!(
-                        projected_batch_serialized_len_with_continuation(
-                            &output, &defaults, "agent:oe:demo", &queries,
-                            Some("wc_sess_read_check"), budget,
-                        ),
-                        frozen_projected_search_batch_len(&output, &defaults, context),
-                        "case {case_id}: parser-ready continuation bytes must match canonical bytes"
-                    );
-                }
-                assert_eq!(
-                    output, snapshot,
-                    "budget measurement may not change original results"
-                );
             }
         }
     }

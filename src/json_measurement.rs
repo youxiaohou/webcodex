@@ -21,21 +21,6 @@ impl Write for CountingWriter {
     }
 }
 
-/// Exact UTF-8 JSON string length with no intermediate buffer, including
-/// the surrounding quotes. Mirrors serde_json escaping (not a content cache).
-pub(crate) fn serialized_json_string_len(text: &str) -> Option<usize> {
-    let mut bytes = text.len().checked_add(2)?;
-    for byte in text.bytes() {
-        let added = match byte {
-            b'"' | b'\\' | b'\x08' | b'\t' | b'\n' | b'\x0c' | b'\r' => 1,
-            0x00..=0x1f => 5,
-            _ => 0,
-        };
-        bytes = bytes.checked_add(added)?;
-    }
-    Some(bytes)
-}
-
 pub(crate) fn serialized_json_len<T: Serialize + ?Sized>(
     value: &T,
 ) -> Result<usize, serde_json::Error> {
@@ -53,38 +38,6 @@ mod tests {
         assert_eq!(
             serialized_json_len(value).unwrap(),
             serde_json::to_vec(value).unwrap().len()
-        );
-    }
-
-    #[test]
-    fn direct_string_length_matches_json_serializer_for_controls_and_unicode() {
-        let all_controls: String = (0u8..=31).map(char::from).collect();
-        let inputs = [
-            "",
-            "quote \" backslash \\",
-            "single\nline\twith\rcontrols\x08\x0c",
-            "中文文字 🦀 emoji \u{2028} \u{2029}",
-            "plain ASCII",
-        ];
-        for text in inputs
-            .iter()
-            .copied()
-            .chain(std::iter::once(all_controls.as_str()))
-        {
-            assert_eq!(
-                serialized_json_string_len(text),
-                Some(serialized_json_len(text).unwrap())
-            );
-        }
-        let lengthy = format!("{}{}", "界🦀".repeat(9000), all_controls.repeat(300));
-        assert_eq!(
-            serialized_json_string_len(&lengthy),
-            Some(serialized_json_len(&lengthy).unwrap())
-        );
-        let quote = "\"".repeat(98 * 1024);
-        assert_eq!(
-            serialized_json_string_len(&quote),
-            Some(serialized_json_len(&quote).unwrap())
         );
     }
 
