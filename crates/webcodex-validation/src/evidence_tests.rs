@@ -3699,3 +3699,78 @@ fn assert_no_raw_validation_output_fields(value: &Value, context: &str) {
         );
     }
 }
+
+#[test]
+#[ignore = "manual validation start-event borrow cost comparison on a synthetic 1,600-event ledger"]
+fn validation_start_event_borrow_cost_comparison() {
+    use std::time::Instant;
+
+    let store = SessionStore::new(2, 2_000);
+    let session = store.start_session(Some("agent:eval:demo".into()), None);
+    let args = json!({
+        "project":"agent:eval:demo",
+        "command_summary":"cargo check --locked --all-targets",
+        "cwd":"src",
+        "purpose":"validation",
+        "metadata": vec!["bounded field"; 20]
+    });
+    for _ in 0..100 {
+        record_finished_tool(
+            &store,
+            &session.session_id,
+            "cargo_check",
+            args.clone(),
+            true,
+            json!({"exit_code":0}),
+        );
+    }
+    let summary = store.summary(&session.session_id, Some(200)).unwrap();
+    let events = (0..8)
+        .flat_map(|_| summary.events.iter().cloned())
+        .collect::<Vec<_>>();
+    let start_count = events
+        .iter()
+        .filter(|event| event.kind == "tool_call_started")
+        .count();
+    assert_eq!(start_count, 800);
+    // Exactly the start selection executed by the extractor, isolating deep
+    // SessionEvent clones from unrelated failure reconciliation and JSON output.
+    let mut legacy_ns = 0_u128;
+    let mut borrowed_ns = 0_u128;
+    for index in 0..100 {
+        if index % 2 == 0 {
+            let start = Instant::now();
+            let selected = events
+                .iter()
+                .filter(|event| event.kind == "tool_call_started")
+                .cloned()
+                .collect::<Vec<_>>();
+            std::hint::black_box(selected);
+            legacy_ns += start.elapsed().as_nanos();
+        }
+        let start = Instant::now();
+        let selected = events
+            .iter()
+            .filter(|event| event.kind == "tool_call_started")
+            .collect::<Vec<_>>();
+        std::hint::black_box(selected);
+        borrowed_ns += start.elapsed().as_nanos();
+        if index % 2 != 0 {
+            let start = Instant::now();
+            let selected = events
+                .iter()
+                .filter(|event| event.kind == "tool_call_started")
+                .cloned()
+                .collect::<Vec<_>>();
+            std::hint::black_box(selected);
+            legacy_ns += start.elapsed().as_nanos();
+        }
+    }
+    println!(
+        "validation_start_selection events={} starts={} legacy_avg_ms={:.4} borrowed_avg_ms={:.4} ratio={:.2}x",
+        events.len(), start_count,
+        legacy_ns as f64 / 100.0 / 1e6,
+        borrowed_ns as f64 / 100.0 / 1e6,
+        legacy_ns as f64 / borrowed_ns as f64,
+    );
+}

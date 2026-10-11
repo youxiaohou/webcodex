@@ -876,7 +876,9 @@ fn extract_validation_event_records(events: &[SessionEvent]) -> Vec<ExtractedVal
     for event in events {
         match event.kind.as_str() {
             "tool_call_started" if execution_purpose(event).is_some() => {
-                started.push(event.clone());
+                // Pairing and validation extraction only borrow the start.
+                // Do not duplicate its potentially large captured input metadata.
+                started.push(event);
             }
             "tool_call_finished" => {
                 if !canonical_finished_ids.contains(event.event_id.as_str()) {
@@ -890,9 +892,7 @@ fn extract_validation_event_records(events: &[SessionEvent]) -> Vec<ExtractedVal
                     continue;
                 }
                 let start = matching_start(&mut started, event);
-                if let Some(validation_event) =
-                    validation_event_from_finished(event, start.as_ref())
-                {
+                if let Some(validation_event) = validation_event_from_finished(event, start) {
                     validation_events.push(ExtractedValidationEvent {
                         source_event_id: event.event_id.clone(),
                         event: validation_event,
@@ -1557,10 +1557,10 @@ fn validation_failure_kind(
     "unknown"
 }
 
-fn matching_start(
-    started: &mut Vec<SessionEvent>,
+fn matching_start<'a>(
+    started: &mut Vec<&'a SessionEvent>,
     finished: &SessionEvent,
-) -> Option<SessionEvent> {
+) -> Option<&'a SessionEvent> {
     let pos = if let Some(call_id) = finished.call_id.as_deref() {
         // call_id is the exact pair-level correlation. In particular, a
         // same-Session logical invocation has recorder and business starts with
