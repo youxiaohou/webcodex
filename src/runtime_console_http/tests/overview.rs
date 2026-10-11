@@ -32,6 +32,53 @@ fn runtime_home_recent_ranking_is_working_then_updated_at_then_identity() {
 }
 
 #[test]
+fn runtime_home_recent_bounded_topk_matches_stable_full_sort() {
+    let template = recent_test_row("runner", "agent:runner:p", "seed", 0, false, false, false);
+    let mut collector = RecentSessionsCollector::default();
+    let mut reference = Vec::new();
+    for index in 0..10_000 {
+        let mut row = template.clone();
+        // Deliberately repeat exact rank identities with differing labels to
+        // prove that full-sort stability survives the heap selection boundary.
+        row.client_id = format!("runner-{}", index % 7);
+        row.project_id = format!("agent:runner:p-{}", index % 23);
+        row.project_name = Some(format!("label-{index}"));
+        row.session.session_id = format!("session-{}", index % 47);
+        row.session.updated_at = ((index * 19) % 101) as i64;
+        row.session.running_call = index % 17 == 0;
+        row.session.running_jobs = usize::from(index % 29 == 0);
+        if index >= 9_600 {
+            row.client_id = "runner-tie".to_string();
+            row.project_id = "agent:runner:tie".to_string();
+            row.session.session_id = "same-rank".to_string();
+            row.session.updated_at = 100_000;
+            row.session.running_call = true;
+            row.session.running_jobs = 0;
+        }
+        reference.push(row.clone());
+        collector.push(row);
+    }
+    reference.sort_by(compare_recent_sessions);
+    reference.truncate(HOME_RECENT_SESSION_LIMIT);
+    let actual = collector.finish(true);
+    assert_eq!(actual.candidate_count, 10_000);
+    assert_eq!(
+        actual.sessions[0].project_name.as_deref(),
+        Some("label-9600")
+    );
+    assert_eq!(
+        actual.sessions[99].project_name.as_deref(),
+        Some("label-9699")
+    );
+    assert_eq!(actual.returned, HOME_RECENT_SESSION_LIMIT);
+    assert!(actual.truncated);
+    assert!(actual.scan_truncated);
+    assert_eq!(
+        serde_json::to_value(&actual.sessions).unwrap(),
+        serde_json::to_value(reference).unwrap(),
+    );
+}
+#[test]
 fn runtime_home_recent_and_project_scans_are_explicitly_bounded() {
     let recent = finalize_recent_sessions(
         (0..HOME_RECENT_SESSION_LIMIT + 3)
