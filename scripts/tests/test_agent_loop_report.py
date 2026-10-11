@@ -100,6 +100,7 @@ class AgentLoopReportTests(unittest.TestCase):
         error_kind: str | None = None,
         edit_outcome: object | None = None,
         normalization_code: object | None = None,
+        output_transfer: dict[str, object] | None = None,
         schema_version: int = 12,
     ) -> None:
         telemetry: dict[str, object] = {
@@ -125,6 +126,8 @@ class AgentLoopReportTests(unittest.TestCase):
             telemetry["readiness"] = readiness
         if job_convergence is not None:
             telemetry["job_convergence"] = job_convergence
+        if output_transfer is not None:
+            telemetry["output_transfer"] = output_transfer
         summary: dict[str, object] = {}
         if previous_trace_id is not None:
             summary["previous_meaningful_call"] = previous_trace_id
@@ -588,6 +591,96 @@ class AgentLoopReportTests(unittest.TestCase):
             {"inspect_diagnostic": 1},
         )
         self.assertIsNone(result["failures"]["resolved_recoveries"])
+
+    def test_output_transfer_reports_read_text_and_job_log_bytes_without_payload(self) -> None:
+        self.insert_event(
+            "read",
+            tool="read_files",
+            schema_version=13,
+            output_transfer={
+                "kind": "read_files", "items": 3, "text_bytes": 120,
+                "identical_same_path_text_items": 1,
+                "identical_same_path_text_bytes": 40,
+                "PRIVATE_SOURCE": "PRIVATE_CONTENT",
+            },
+        )
+        self.insert_event(
+            "observe",
+            tool="observe_jobs",
+            schema_version=13,
+            output_transfer={
+                "kind": "observe_jobs", "items": 4,
+                "baseline_items": 1, "delta_items": 1,
+                "reset_items": 1, "unchanged_items": 1,
+                "baseline_log_bytes": 50, "delta_log_bytes": 10,
+                "reset_log_bytes": 30, "unchanged_log_bytes": 0,
+                "PRIVATE_LOG": "PRIVATE_CONTENT",
+            },
+            started=150, handed=170, transition="serial",
+        )
+        result = self.summarize()
+        reads = result["output_transfer"]["read_files"]
+        jobs = result["output_transfer"]["observe_jobs"]
+        self.assertEqual((reads["calls"], reads["measured_calls"]), (1, 1))
+        self.assertEqual(reads["metrics"]["text_bytes"]["total"], 120)
+        self.assertEqual(reads["metrics"]["identical_same_path_text_bytes"]["total"], 40)
+        self.assertEqual(jobs["metrics"]["reset_log_bytes"]["total"], 30)
+        self.assertEqual(jobs["metrics"]["delta_log_bytes"]["total"], 10)
+        self.assertEqual(jobs["metrics"]["unchanged_items"]["total"], 1)
+        self.assertTrue(result["availability"]["output_transfer"]["read_files"]["available"])
+        self.assertTrue(result["availability"]["output_transfer"]["observe_jobs"]["available"])
+        self.assertNotIn("PRIVATE_", json.dumps(result))
+
+    def test_output_transfer_missing_and_invalid_counters_are_not_zero(self) -> None:
+        valid = {
+            "kind": "read_files", "items": 1, "text_bytes": 15,
+            "identical_same_path_text_items": 0,
+            "identical_same_path_text_bytes": 0,
+        }
+        self.insert_event("read-known", tool="read_files", schema_version=13,
+                          output_transfer=valid)
+        self.insert_event("read-legacy", tool="read_files", schema_version=12,
+                          started=150, handed=170, transition="serial")
+        invalid_job = {
+            "kind": "observe_jobs", "items": 1,
+            "baseline_items": 1, "delta_items": 1,
+            "reset_items": 0, "unchanged_items": 0,
+            "baseline_log_bytes": 20, "delta_log_bytes": 10,
+            "reset_log_bytes": 0, "unchanged_log_bytes": 0,
+        }
+        self.insert_event("observe-bad", tool="observe_jobs", schema_version=13,
+                          output_transfer=invalid_job, started=200, handed=220,
+                          transition="serial")
+        result = self.summarize()
+        reads = result["output_transfer"]["read_files"]
+        self.assertEqual((reads["calls"], reads["measured_calls"]), (2, 1))
+        self.assertEqual(reads["metrics"]["text_bytes"]["observed_total"], 15)
+        self.assertEqual(reads["metrics"]["text_bytes"]["missing"], 1)
+        self.assertIsNone(reads["metrics"]["text_bytes"]["total"])
+        self.assertFalse(result["availability"]["output_transfer"]["read_files"]["available"])
+        jobs = result["output_transfer"]["observe_jobs"]
+        self.assertEqual((jobs["calls"], jobs["measured_calls"]), (1, 0))
+        self.assertEqual(jobs["metrics"]["reset_log_bytes"]["missing"], 1)
+        self.assertIsNone(jobs["metrics"]["reset_log_bytes"]["total"])
+        self.assertFalse(result["availability"]["output_transfer"]["observe_jobs"]["available"])
+
+    def test_output_transfer_trace_only_and_absent_call_lanes_are_unavailable(self) -> None:
+        trace, availability = report._summarize_output_transfer(
+            [], action_audit_available=False
+        )
+        for tool in ("read_files", "observe_jobs"):
+            self.assertIsNone(trace[tool]["calls"])
+            self.assertIsNone(trace[tool]["measured_calls"])
+            self.assertIsNone(trace[tool]["metrics"]["items"]["total"])
+            self.assertFalse(availability[tool]["available"])
+        no_calls, unavailable = report._summarize_output_transfer(
+            [{"action_name": "toolsCall", "operation": "run_shell"}],
+            action_audit_available=True,
+        )
+        for tool in ("read_files", "observe_jobs"):
+            self.assertEqual(no_calls[tool]["calls"], 0)
+            self.assertIsNone(no_calls[tool]["metrics"]["items"]["total"])
+            self.assertFalse(unavailable[tool]["available"])
 
     def test_edit_outcomes_are_aggregated_from_authoritative_telemetry(self) -> None:
         self.insert_event(
