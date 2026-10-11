@@ -471,6 +471,67 @@ class AgentLoopBenchmarkTests(unittest.TestCase):
             )
         )
 
+    def test_paired_delta_summary_uses_only_correctness_qualified_pairs(self) -> None:
+        def paired(wall: int, calls: int, result_bytes: int) -> dict:
+            return {
+                "comparison": {
+                    "throughput_compatibility": {"comparable": True},
+                    "metrics": [
+                        {"metric": "task_wall_time_ms", "baseline": 1000, "candidate": 1000 + wall, "delta": wall, "comparable": True},
+                        {"metric": "outer_calls.total", "baseline": 5, "candidate": 5 + calls, "delta": calls, "comparable": True},
+                        {"metric": "results.serialized_tool_result_bytes.total", "baseline": 1000, "candidate": 1000 + result_bytes, "delta": result_bytes, "comparable": True},
+                    ],
+                }
+            }
+
+        result = benchmark._paired_delta_summary([
+            paired(-300, -2, -400),
+            {"comparison": None},
+            paired(-100, -1, -200),
+            {"comparison": {"throughput_compatibility": {"comparable": False}, "metrics": [
+                {"metric": "task_wall_time_ms", "baseline": 1000, "candidate": 1, "delta": -999, "comparable": True},
+            ]}},
+        ])
+        self.assertEqual(result["qualified_pairs"], 2)
+        self.assertEqual(result["excluded_pairs"], 2)
+        wall = result["candidate_minus_direct"]["task_wall_time_ms"]
+        self.assertEqual(
+            wall,
+            {"total": -400, "observed_total": -400, "p50": -300, "p95": -100, "samples": 2, "missing": 0, "complete": True},
+        )
+        self.assertEqual(result["candidate_minus_direct"]["outer_calls.total"]["p50"], -2)
+        self.assertEqual(result["candidate_minus_direct"]["results.serialized_tool_result_bytes.total"]["p95"], -200)
+        repair = result["candidate_minus_direct"]["repair_turns.total"]
+        self.assertEqual((repair["samples"], repair["missing"], repair["total"]), (0, 2, None))
+        self.assertFalse(repair["complete"])
+
+    def test_paired_delta_summary_missing_and_malformed_metrics_fail_closed(self) -> None:
+        valid = {"metric": "task_wall_time_ms", "baseline": 100, "candidate": 90, "delta": -10, "comparable": True}
+        comparison = lambda metrics: {
+            "comparison": {"throughput_compatibility": {"comparable": True}, "metrics": metrics}
+        }
+        result = benchmark._paired_delta_summary([
+            comparison([valid]),
+            comparison([
+                {"metric": "task_wall_time_ms", "baseline": True, "candidate": 90, "delta": -10, "comparable": True},
+            ]),
+            comparison([valid, valid]),
+            comparison([
+                {"metric": "task_wall_time_ms", "baseline": 100, "candidate": 90, "delta": -5, "comparable": True},
+            ]),
+        ])
+        metric = result["candidate_minus_direct"]["task_wall_time_ms"]
+        self.assertEqual((metric["samples"], metric["missing"]), (1, 3))
+        self.assertEqual(metric["observed_total"], -10)
+        self.assertIsNone(metric["total"])
+        self.assertFalse(metric["complete"])
+        self.assertEqual(metric["p50"], -10)
+        empty = benchmark._paired_delta_summary([{"comparison": None}])
+        self.assertEqual(empty["qualified_pairs"], 0)
+        self.assertIsNone(empty["candidate_minus_direct"]["task_wall_time_ms"]["total"])
+        self.assertIsNone(empty["candidate_minus_direct"]["task_wall_time_ms"]["p50"])
+        self.assertFalse(empty["candidate_minus_direct"]["task_wall_time_ms"]["complete"])
+
     def test_annotation_normalizes_omitted_correctness_verdicts(self) -> None:
         manifest = report.load_case_manifest(report.DEFAULT_CASE_MANIFEST)
         readonly = report._case_by_id(manifest, "readonly_review")
@@ -1180,6 +1241,13 @@ class AgentLoopBenchmarkTests(unittest.TestCase):
             self.assertIn("Agent Loop benchmark", completed.stdout)
             value = json.loads(output.read_text(encoding="utf-8"))
             self.assertEqual(value["status_counts"]["unsupported"], 2)
+            paired = value["cases"][0]["paired_delta_summary"]
+            self.assertEqual(paired["qualified_pairs"], 0)
+            self.assertEqual(paired["excluded_pairs"], 1)
+            self.assertIsNone(
+                paired["candidate_minus_direct"]["task_wall_time_ms"]["total"]
+            )
+            self.assertIn("paired_wall_p50_delta_ms=unavailable", completed.stdout)
 
 
 if __name__ == "__main__":

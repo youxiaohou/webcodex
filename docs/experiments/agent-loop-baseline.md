@@ -323,6 +323,20 @@ process, or pending without terminal evidence remains `partial`/`unsupported`,
 never upgraded to success.
 The guarded multi-file case is likewise not a pass from final bytes alone: persisted Direct canonical-call or Code Mode composition evidence must show exactly one `edit_project_files` call, at least one admitted search call, and at least two `read_files` calls (pre-edit and post-edit phases). Direct additionally requires the existing authoritative ModelErgonomics edit outcome to be exactly `applied`. Code Mode requires exactly one consequential known-result child, zero Job handoffs/outcome-unknown/nested failures, and the aggregate canonical mutation evidence to show one `state_changed=true` mutation and zero known no-change mutations, in addition to the fixture-side exact-byte oracle. A dry-run/no-op edit plus shell/process/write fallback therefore cannot be promoted to a pass. Current composition does not prove nested child ordering, so the benchmark does not claim stronger sequencing evidence than is persisted.
 
+The paired benchmark JSON also includes `paired_delta_summary` per case.
+It aggregates only pairs whose Direct and Code Mode reports passed the existing
+same-case/base and correctness/validation throughput gates. For task wall
+time, model-visible outer-call count (`outer_calls.total`), serialized
+`ToolResult` bytes, and annotated contract-repair turns, it reports the
+candidate-minus-Direct delta count, observed sum, and deterministic nearest-rank
+p50/p95. Each metric includes qualified-sample and missing counts; incomplete
+metrics have `total=null`, and cases with no qualified pairs never report a
+fabricated zero. The human summary prints the qualified pair count and a
+task-wall p50 delta only when all qualified pairs have timing evidence.
+These descriptive aggregates are not a causal speedup estimate, complete
+HTTP/token measurements, or exact model-turn counts. Use paired sample order,
+correctness, and end-to-end Host evidence before recommending defaults.
+
 This command coordinates real captures; it is not itself evidence that a model made
 fewer inference turns. Deterministic runtime/script acceptance and fixture oracles
 prove runtime mechanics and final state. Direct-vs-Code Mode ergonomics require a
