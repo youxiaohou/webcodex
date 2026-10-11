@@ -3,7 +3,7 @@
 use super::files::{SearchOptions, SearchRequest};
 use super::project_resolution::ResolvedProject;
 use super::{SearchProjectTextsQuery, SuggestedToolCall, ToolResult, ToolRuntime};
-use crate::json_measurement::serialized_json_len;
+use crate::json_measurement::{serialized_json_len, serialized_json_string_len};
 use futures_util::{stream, StreamExt};
 use serde_json::{json, Value};
 use std::time::Duration;
@@ -143,13 +143,165 @@ fn serialized_value_len(value: &Value) -> usize {
     serialized_json_len(value).unwrap_or(usize::MAX)
 }
 
-fn projected_batch_serialized_len(output: &Value, default_timeouts: &[bool]) -> usize {
-    let mut projected = ToolResult::ok(output.clone());
+/// Replace only canonical match-preview strings in a temporary search item.
+/// Result content itself remains borrowed; all other metadata and unknown
+/// fields are cloned without interpretation. This changes sizing only.
+fn cloned_search_item_without_previews<'a>(item: &'a Value) -> (Value, Vec<(usize, &'a str)>) {
+    let Some(fields) = item.as_object() else {
+        return (item.clone(), Vec::new());
+    };
+    let Some(output) = fields.get("output").and_then(Value::as_object) else {
+        return (item.clone(), Vec::new());
+    };
+    let Some(matches) = output.get("matches").and_then(Value::as_array) else {
+        return (item.clone(), Vec::new());
+    };
+    let mut previews = Vec::new();
+    let compact_matches = matches
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let Some(item) = value.as_object() else {
+                return value.clone();
+            };
+            let Some(preview) = item.get("preview").and_then(Value::as_str) else {
+                return value.clone();
+            };
+            previews.push((index, preview));
+            let mut fields = serde_json::Map::new();
+            for (key, value) in item {
+                fields.insert(
+                    key.clone(),
+                    if key == "preview" {
+                        json!("")
+                    } else {
+                        value.clone()
+                    },
+                );
+            }
+            Value::Object(fields)
+        })
+        .collect::<Vec<_>>();
+
+    let mut output_clone = serde_json::Map::new();
+    for (key, value) in output {
+        if key != "matches" {
+            output_clone.insert(key.clone(), value.clone());
+        }
+    }
+    output_clone.insert("matches".to_string(), Value::Array(compact_matches));
+    let mut item_clone = serde_json::Map::new();
+    for (key, value) in fields {
+        if key != "output" {
+            item_clone.insert(key.clone(), value.clone());
+        }
+    }
+    item_clone.insert("output".to_string(), Value::Object(output_clone));
+    (Value::Object(item_clone), previews)
+}
+
+fn cloned_search_batch_without_previews<'a>(
+    output: &'a Value,
+) -> (Value, Vec<(usize, usize, &'a str)>) {
+    let Some(root) = output.as_object() else {
+        return (output.clone(), Vec::new());
+    };
+    let Some(items) = root.get("items").and_then(Value::as_array) else {
+        return (output.clone(), Vec::new());
+    };
+    let mut previews = Vec::new();
+    let items = items
+        .iter()
+        .enumerate()
+        .map(|(item_index, item)| {
+            let (metadata, item_previews) = cloned_search_item_without_previews(item);
+            previews.extend(
+                item_previews
+                    .into_iter()
+                    .map(|(match_index, preview)| (item_index, match_index, preview)),
+            );
+            metadata
+        })
+        .collect::<Vec<_>>();
+    let mut root_clone = serde_json::Map::new();
+    for (key, value) in root {
+        if key != "items" {
+            root_clone.insert(key.clone(), value.clone());
+        }
+    }
+    root_clone.insert("items".to_string(), Value::Array(items));
+    (Value::Object(root_clone), previews)
+}
+
+// One exact model-facing measurement, with or without a parser-ready query
+// continuation. The native search preview strings are not needed to decide
+// sparse metadata, but their escaped UTF-8 bytes must still count precisely.
+fn projected_search_batch_json_size(
+    output: &Value,
+    default_timeouts: &[bool],
+    continuation: Option<(
+        &str,
+        &[SearchProjectTextsQuery],
+        Option<&str>,
+        Option<usize>,
+    )>,
+) -> usize {
+    let (compact, previews) = cloned_search_batch_without_previews(output);
+    let mut projected = ToolResult::ok(compact);
     super::result_projection::sparsify_search_batch_success_for_model(
         default_timeouts,
         &mut projected,
     );
-    serialized_json_len(&projected).unwrap_or(usize::MAX)
+    if let Some((project, original_queries, session_id, max_result_bytes)) = continuation {
+        add_actionable_search_continuation(
+            &mut projected,
+            project,
+            original_queries,
+            session_id,
+            max_result_bytes,
+        );
+    }
+    if previews.iter().any(|(item_index, match_index, _)| {
+        projected.output["items"][*item_index]["output"]["matches"][*match_index]["preview"]
+            .as_str()
+            != Some("")
+    }) {
+        // Structural projection contracts can evolve independently. If any
+        // placeholder was removed or transformed, reuse the canonical result
+        // rather than undercount an unrecognized wire shape.
+        let mut original = ToolResult::ok(output.clone());
+        super::result_projection::sparsify_search_batch_success_for_model(
+            default_timeouts,
+            &mut original,
+        );
+        if let Some((project, original_queries, session_id, max_result_bytes)) = continuation {
+            add_actionable_search_continuation(
+                &mut original,
+                project,
+                original_queries,
+                session_id,
+                max_result_bytes,
+            );
+        }
+        return serialized_json_len(&original).unwrap_or(usize::MAX);
+    }
+    let Some(mut size) = serialized_json_len(&projected).ok() else {
+        return usize::MAX;
+    };
+    for (_, _, preview) in previews {
+        let Some(encoded) = serialized_json_string_len(preview) else {
+            return usize::MAX;
+        };
+        let Some(next) = size.checked_add(encoded.saturating_sub(2)) else {
+            return usize::MAX;
+        };
+        size = next;
+    }
+    size
+}
+
+fn projected_batch_serialized_len(output: &Value, default_timeouts: &[bool]) -> usize {
+    projected_search_batch_json_size(output, default_timeouts, None)
 }
 
 fn projected_batch_serialized_len_with_continuation(
@@ -160,23 +312,16 @@ fn projected_batch_serialized_len_with_continuation(
     session_id: Option<&str>,
     max_result_bytes: Option<usize>,
 ) -> usize {
-    let mut projected = ToolResult::ok(output.clone());
-    super::result_projection::sparsify_search_batch_success_for_model(
+    projected_search_batch_json_size(
+        output,
         default_timeouts,
-        &mut projected,
-    );
-    add_actionable_search_continuation(
-        &mut projected,
-        project,
-        original_queries,
-        session_id,
-        max_result_bytes,
-    );
-    serialized_json_len(&projected).unwrap_or(usize::MAX)
+        Some((project, original_queries, session_id, max_result_bytes)),
+    )
 }
 
 fn projected_search_item_len(item: &Value, default_timeout: bool) -> usize {
-    let mut projected = item.clone();
+    let (compact, previews) = cloned_search_item_without_previews(item);
+    let mut projected = compact;
     if projected["success"].as_bool() == Some(true) {
         if let Some(output) = projected.get_mut("output").and_then(Value::as_object_mut) {
             super::result_projection::sparsify_search_output_for_model(
@@ -186,7 +331,34 @@ fn projected_search_item_len(item: &Value, default_timeout: bool) -> usize {
             );
         }
     }
-    serialized_value_len(&projected)
+    if previews.iter().any(|(match_index, _)| {
+        projected["output"]["matches"][*match_index]["preview"].as_str() != Some("")
+    }) {
+        let mut original = item.clone();
+        if original["success"].as_bool() == Some(true) {
+            if let Some(output) = original.get_mut("output").and_then(Value::as_object_mut) {
+                super::result_projection::sparsify_search_output_for_model(
+                    output,
+                    default_timeout,
+                    true,
+                );
+            }
+        }
+        return serialized_value_len(&original);
+    }
+    let Some(mut size) = serialized_json_len(&projected).ok() else {
+        return usize::MAX;
+    };
+    for (_, preview) in previews {
+        let Some(encoded) = serialized_json_string_len(preview) else {
+            return usize::MAX;
+        };
+        let Some(next) = size.checked_add(encoded.saturating_sub(2)) else {
+            return usize::MAX;
+        };
+        size = next;
+    }
+    size
 }
 
 fn projected_batch_len(base_len: usize, item_bytes: usize, item_count: usize) -> usize {
@@ -209,20 +381,20 @@ fn apply_output_budget(
 ) -> Value {
     let result_budget = normalized_result_budget(max_result_bytes);
     let payload_budget = result_budget.saturating_sub(MODEL_RESULT_ENVELOPE_RESERVE_BYTES);
-    let complete = batch_output(
-        project,
-        requested_count,
-        completed.clone(),
-        false,
-        None,
-        None,
-    );
+    // Own the result batch while measuring its final sparse projection.
+    // For the common complete-fit path, return the same items without cloning
+    // every search match, preview, and contextual source excerpt.
+    let mut complete = batch_output(project, requested_count, completed, false, None, None);
     // First evaluate the exact sparse model projection. Canonical search
     // metadata stays intact unless that final applicable projection itself
     // exceeds the response budget.
     if projected_batch_serialized_len(&complete, default_timeouts) <= payload_budget {
         return complete;
     }
+    let completed = complete["items"]
+        .as_array_mut()
+        .map(std::mem::take)
+        .expect("batch_output always contains the canonical search items");
 
     let truncation_reason = if result_budget == MAX_SERIALIZED_OUTPUT_BYTES {
         "hard_result_cap"
@@ -283,14 +455,24 @@ fn apply_output_budget(
             break;
         };
         next_index = removed["index"].as_u64().map(|index| index as usize);
-        output = batch_output(
-            project,
-            requested_count,
-            items.clone(),
-            true,
-            next_index,
-            Some(truncation_reason),
-        );
+        // Keep the owned accepted prefix. Rebuilding the whole batch copied
+        // potentially 512 KiB of search previews on every backoff step.
+        let succeeded_count = items
+            .iter()
+            .filter(|item| item["success"].as_bool() == Some(true))
+            .count();
+        let returned_count = items.len();
+        output["returned_count"] = json!(returned_count);
+        output["succeeded_count"] = json!(succeeded_count);
+        output["failed_count"] = json!(returned_count - succeeded_count);
+        if let Some(index) = next_index {
+            output["next_index"] = json!(index);
+        } else {
+            output
+                .as_object_mut()
+                .expect("canonical batch")
+                .remove("next_index");
+        }
     }
     output
 }
@@ -542,14 +724,27 @@ fn attach_bounded_remaining_summaries(
     if let Some(root) = output.as_object_mut() {
         root.remove("remaining_summaries");
     }
-    let mut accepted = Vec::with_capacity(summaries.len());
+    // Probe summaries in the canonical output. Rebuilding a fresh response on
+    // each of up to eight suffixes repeatedly deep-cloned already returned
+    // source previews. Remove the last summary when the exact projection no
+    // longer fits; the final accepted prefix is unchanged.
+    output["remaining_summaries"] = json!([]);
     for summary in summaries {
-        accepted.push(summary.clone());
-        let mut candidate = output.clone();
-        candidate["remaining_summaries"] = json!(accepted);
-        if measure(&candidate) <= max_len {
-            *output = candidate;
-        } else {
+        output["remaining_summaries"]
+            .as_array_mut()
+            .expect("remaining_summaries is a JSON array")
+            .push(summary.clone());
+        if measure(output) > max_len {
+            let accepted = output["remaining_summaries"]
+                .as_array_mut()
+                .expect("remaining_summaries is a JSON array");
+            accepted.pop();
+            if accepted.is_empty() {
+                output
+                    .as_object_mut()
+                    .expect("search batch is a JSON object")
+                    .remove("remaining_summaries");
+            }
             break;
         }
     }
@@ -671,14 +866,22 @@ pub(crate) fn apply_model_facing_output_budget(
     else {
         return;
     };
-    let Some(completed) = output.get("items").and_then(Value::as_array).cloned() else {
+    // Summaries use only bounded per-query metadata. Calculate those before
+    // transferring ownership of the potentially large match/preview bodies;
+    // this avoids two full-batch copies before any size check.
+    let Some(completed) = result
+        .output
+        .get_mut("items")
+        .and_then(Value::as_array_mut)
+        .map(std::mem::take)
+    else {
         return;
     };
-
+    let summary_candidates = remaining_query_summaries(&completed, 0);
     let mut budgeted = apply_output_budget(
         &output_project,
         requested_count,
-        completed.clone(),
+        completed,
         default_timeouts,
         max_result_bytes,
     );
@@ -694,7 +897,18 @@ pub(crate) fn apply_model_facing_output_budget(
         .and_then(Value::as_u64)
         .map(|index| index as usize);
     let summaries = next_index
-        .map(|index| remaining_query_summaries(&completed, index))
+        .map(|index| {
+            summary_candidates
+                .iter()
+                .filter(|summary| {
+                    summary
+                        .get("index")
+                        .and_then(Value::as_u64)
+                        .is_some_and(|summary_index| summary_index as usize >= index)
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        })
         .unwrap_or_default();
     let continuation_fits = projected_batch_serialized_len_with_continuation(
         &budgeted,
@@ -749,9 +963,9 @@ pub(crate) fn apply_model_facing_output_budget(
     ] {
         root.remove(key);
     }
-    if let Some(budgeted) = budgeted.as_object() {
+    if let Value::Object(budgeted) = budgeted {
         for (key, value) in budgeted {
-            root.insert(key.clone(), value.clone());
+            root.insert(key, value);
         }
     }
 }
@@ -1204,6 +1418,594 @@ mod tests {
         assert!(!serde_json::to_string(&batch)
             .unwrap()
             .contains("/private/absolute/secret.rs"));
+    }
+
+    // Frozen pre-optimization budget and output projection for regression.
+    // Kept test-only and intentionally independent of the move-based path.
+    fn legacy_apply_output_budget(
+        project: &str,
+        requested_count: usize,
+        completed: Vec<Value>,
+        default_timeouts: &[bool],
+        max_result_bytes: Option<usize>,
+    ) -> Value {
+        let result_budget = normalized_result_budget(max_result_bytes);
+        let payload_budget = result_budget.saturating_sub(MODEL_RESULT_ENVELOPE_RESERVE_BYTES);
+        let complete = batch_output(
+            project,
+            requested_count,
+            completed.clone(),
+            false,
+            None,
+            None,
+        );
+        // First evaluate the exact sparse model projection. Canonical search
+        // metadata stays intact unless that final applicable projection itself
+        // exceeds the response budget.
+        if projected_batch_serialized_len(&complete, default_timeouts) <= payload_budget {
+            return complete;
+        }
+
+        let truncation_reason = if result_budget == MAX_SERIALIZED_OUTPUT_BYTES {
+            "hard_result_cap"
+        } else {
+            "batch_response_budget"
+        };
+        let base_len = projected_batch_serialized_len(
+            &batch_output(
+                project,
+                requested_count,
+                Vec::new(),
+                true,
+                Some(0),
+                Some(truncation_reason),
+            ),
+            default_timeouts,
+        );
+        let mut returned = Vec::with_capacity(completed.len());
+        let mut returned_item_bytes = 0usize;
+        let mut next_index = None;
+
+        for item in completed {
+            let index = item["index"].as_u64().unwrap_or(returned.len() as u64) as usize;
+            let item_len = projected_search_item_len(
+                &item,
+                default_timeouts.get(index).copied().unwrap_or(false),
+            );
+            let candidate_item_count = returned.len() + 1;
+            if projected_batch_len(
+                base_len,
+                returned_item_bytes.saturating_add(item_len),
+                candidate_item_count,
+            ) <= payload_budget
+            {
+                returned_item_bytes = returned_item_bytes.saturating_add(item_len);
+                returned.push(item);
+                continue;
+            }
+
+            // Search batch continuation is query-granular. Backend match order is
+            // intentionally unstable, so exposing a partial query and resuming by
+            // match position would permit duplicates and gaps across reruns.
+            next_index = Some(index);
+            break;
+        }
+
+        let mut output = batch_output(
+            project,
+            requested_count,
+            returned,
+            true,
+            next_index,
+            Some(truncation_reason),
+        );
+        while projected_batch_serialized_len(&output, default_timeouts) > payload_budget {
+            let Some(items) = output.get_mut("items").and_then(Value::as_array_mut) else {
+                break;
+            };
+            let Some(removed) = items.pop() else {
+                break;
+            };
+            next_index = removed["index"].as_u64().map(|index| index as usize);
+            output = batch_output(
+                project,
+                requested_count,
+                items.clone(),
+                true,
+                next_index,
+                Some(truncation_reason),
+            );
+        }
+        output
+    }
+
+    fn legacy_attach_bounded_remaining_summaries(
+        output: &mut Value,
+        summaries: &[Value],
+        max_len: usize,
+        measure: impl Fn(&Value) -> usize,
+    ) {
+        if summaries.is_empty() {
+            return;
+        }
+        if let Some(root) = output.as_object_mut() {
+            root.remove("remaining_summaries");
+        }
+        let mut accepted = Vec::with_capacity(summaries.len());
+        for summary in summaries {
+            accepted.push(summary.clone());
+            let mut candidate = output.clone();
+            candidate["remaining_summaries"] = json!(accepted);
+            if measure(&candidate) <= max_len {
+                *output = candidate;
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn legacy_apply_model_facing_output_budget(
+        result: &mut ToolResult,
+        default_timeouts: &[bool],
+        max_result_bytes: Option<usize>,
+        project: &str,
+        original_queries: &[SearchProjectTextsQuery],
+        session_id: Option<&str>,
+    ) {
+        if !result.success {
+            return;
+        }
+        let Some(output) = result.output.as_object() else {
+            return;
+        };
+        let Some(output_project) = output
+            .get("project")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        else {
+            return;
+        };
+        let Some(requested_count) = output
+            .get("requested_count")
+            .and_then(Value::as_u64)
+            .map(|count| count as usize)
+        else {
+            return;
+        };
+        let Some(completed) = output.get("items").and_then(Value::as_array).cloned() else {
+            return;
+        };
+
+        let mut budgeted = legacy_apply_output_budget(
+            &output_project,
+            requested_count,
+            completed.clone(),
+            default_timeouts,
+            max_result_bytes,
+        );
+
+        // The parser-ready suffix call is part of the primary model-facing search
+        // projection. Measure it before the optional omitted-query summaries. The
+        // summaries describe already-completed suffix queries but never consume the
+        // canonical next_index; the exact follow-up still begins at that same query.
+        let payload_budget = normalized_result_budget(max_result_bytes)
+            .saturating_sub(MODEL_RESULT_ENVELOPE_RESERVE_BYTES);
+        let next_index = budgeted
+            .get("next_index")
+            .and_then(Value::as_u64)
+            .map(|index| index as usize);
+        let summaries = next_index
+            .map(|index| remaining_query_summaries(&completed, index))
+            .unwrap_or_default();
+        let continuation_fits = projected_batch_serialized_len_with_continuation(
+            &budgeted,
+            default_timeouts,
+            project,
+            original_queries,
+            session_id,
+            max_result_bytes,
+        ) <= payload_budget;
+        if continuation_fits {
+            legacy_attach_bounded_remaining_summaries(
+                &mut budgeted,
+                &summaries,
+                payload_budget,
+                |candidate| {
+                    projected_batch_serialized_len_with_continuation(
+                        candidate,
+                        default_timeouts,
+                        project,
+                        original_queries,
+                        session_id,
+                        max_result_bytes,
+                    )
+                },
+            );
+        } else {
+            if let Some(root) = budgeted.as_object_mut() {
+                root.remove("next_index");
+            }
+            legacy_attach_bounded_remaining_summaries(
+                &mut budgeted,
+                &summaries,
+                payload_budget,
+                |candidate| projected_batch_serialized_len(candidate, default_timeouts),
+            );
+        }
+
+        let Some(root) = result.output.as_object_mut() else {
+            return;
+        };
+        for key in [
+            "project",
+            "requested_count",
+            "returned_count",
+            "succeeded_count",
+            "failed_count",
+            "items",
+            "output_truncated",
+            "next_index",
+            "truncation_reason",
+            "remaining_summaries",
+        ] {
+            root.remove(key);
+        }
+        if let Some(budgeted) = budgeted.as_object() {
+            for (key, value) in budgeted {
+                root.insert(key.clone(), value.clone());
+            }
+        }
+    }
+
+    fn frozen_projected_search_batch_len(
+        output: &Value,
+        default_timeouts: &[bool],
+        continuation: Option<(
+            &str,
+            &[SearchProjectTextsQuery],
+            Option<&str>,
+            Option<usize>,
+        )>,
+    ) -> usize {
+        let mut result = ToolResult::ok(output.clone());
+        super::super::result_projection::sparsify_search_batch_success_for_model(
+            default_timeouts,
+            &mut result,
+        );
+        if let Some((project, queries, session_id, budget)) = continuation {
+            add_actionable_search_continuation(&mut result, project, queries, session_id, budget);
+        }
+        serialized_json_len(&result).unwrap_or(usize::MAX)
+    }
+
+    fn frozen_projected_search_item_len(item: &Value, default_timeout: bool) -> usize {
+        let mut projected = item.clone();
+        if projected["success"].as_bool() == Some(true) {
+            if let Some(output) = projected.get_mut("output").and_then(Value::as_object_mut) {
+                super::super::result_projection::sparsify_search_output_for_model(
+                    output,
+                    default_timeout,
+                    true,
+                );
+            }
+        }
+        serialized_value_len(&projected)
+    }
+
+    #[test]
+    fn projected_search_preview_lengths_match_canonical_json_and_continuations() {
+        let preview_shapes = [
+            String::new(),
+            "plain ASCII".to_string(),
+            "双字节? café 🍜".to_string(),
+            "\" \\ \n \t \r \u{0001} \u{001f}".to_string(),
+            "\u{2028}unicode\u{2029}".to_string(),
+            "界🦀".repeat(2400),
+            "\\quote\\\n".repeat(8000),
+            "x".repeat(128 * 1024),
+        ];
+        let mut cases = Vec::new();
+        for preview in preview_shapes {
+            let mut default = default_matches_item(0, 1, 12);
+            default["output"]["matches"][0]["preview"] = json!(preview);
+            default["output"]["matches"][0]["context_before"] = json!([{
+                "line": 1, "text": "not a preview, left unchanged"
+            }]);
+            default["output"]["matches"][0]["context_after"] = json!(["界 🦀 line"]);
+            cases.push(vec![default]);
+        }
+        cases.push(vec![
+            default_matches_item(0, 40, 300),
+            default_matches_item(1, 8, 1000),
+            files_item(2, 18),
+            count_item(3, 2),
+        ]);
+        cases.push(vec![
+            matches_item(0, 3, 400),
+            json!({"index": 1, "success": false, "output": null, "error": "failed"}),
+            json!({"index": 2, "success": true, "output": {
+                "backend": "other", "result_mode": "matches", "matches": [
+                    {"preview": ["not a string"], "path": "src/x"},
+                    null, {"preview": "", "unknown": true}
+                ], "count": 3, "truncated": true
+            }, "error": null}),
+        ]);
+        cases.push(vec![json!({"index": 0, "success": true, "output": null})]);
+        cases.push(Vec::new());
+
+        for (case_id, items) in cases.into_iter().enumerate() {
+            let count = items.len();
+            let defaults = (0..count).map(|index| index % 2 == 0).collect::<Vec<_>>();
+            let queries = (0..count)
+                .map(|index| test_query(index, None))
+                .collect::<Vec<_>>();
+            for (index, item) in items.iter().enumerate() {
+                for default_timeout in [true, false] {
+                    assert_eq!(
+                        projected_search_item_len(item, default_timeout),
+                        frozen_projected_search_item_len(item, default_timeout),
+                        "case {case_id}, item {index}: projected item length must match"
+                    );
+                }
+            }
+            for truncated in [false, true] {
+                let mut output = batch_output(
+                    "agent:oe:demo",
+                    count,
+                    items.clone(),
+                    truncated,
+                    truncated.then_some(0),
+                    truncated.then_some("batch_response_budget"),
+                );
+                output["session_hint"] = json!({"todo": 3, "important": "context"});
+                output["unknown"] = json!({"special": "\\", "unicode": "界🦀"});
+                let snapshot = output.clone();
+                for budget in [None, Some(0), Some(256 * 1024)] {
+                    let context = Some((
+                        "agent:oe:demo",
+                        queries.as_slice(),
+                        Some("wc_sess_read_check"),
+                        budget,
+                    ));
+                    assert_eq!(
+                        projected_batch_serialized_len(&output, &defaults),
+                        frozen_projected_search_batch_len(&output, &defaults, None),
+                        "case {case_id}: complete sparse projection must match canonical bytes"
+                    );
+                    assert_eq!(
+                        projected_batch_serialized_len_with_continuation(
+                            &output, &defaults, "agent:oe:demo", &queries,
+                            Some("wc_sess_read_check"), budget,
+                        ),
+                        frozen_projected_search_batch_len(&output, &defaults, context),
+                        "case {case_id}: parser-ready continuation bytes must match canonical bytes"
+                    );
+                }
+                assert_eq!(
+                    output, snapshot,
+                    "budget measurement may not change original results"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn owned_search_budget_matches_frozen_legacy_across_budget_shapes() {
+        let cases = [
+            vec![
+                default_matches_item(0, 1, 12),
+                files_item(1, 3),
+                count_item(2, 5),
+            ],
+            (0..8).map(|i| default_matches_item(i, 1, 6_000)).collect(),
+            vec![
+                default_matches_item(0, 1, 130 * 1024),
+                default_matches_item(1, 1, 130 * 1024),
+                files_item(2, 4),
+            ],
+            vec![
+                matches_item(0, 110, 900),
+                json!({"index": 1, "success": false, "output": null, "error": "private_error"}),
+                default_matches_item(2, 2, 18_000),
+            ],
+            vec![
+                json!({"index": 0, "success": false, "output": {"reason_code": "failed"}, "error": "private_error"}),
+            ],
+            vec![],
+        ];
+        let mut complete = 0;
+        let mut truncated = 0;
+        for (case, items) in cases.iter().enumerate() {
+            let count = items.len();
+            let defaults = (0..count).map(|i| i % 2 == 0).collect::<Vec<_>>();
+            for budget in [
+                None,
+                Some(0),
+                Some(256 * 1024),
+                Some(MAX_SERIALIZED_OUTPUT_BYTES),
+            ] {
+                let old = legacy_apply_output_budget(
+                    "agent:oe:demo",
+                    count,
+                    items.clone(),
+                    &defaults,
+                    budget,
+                );
+                let actual =
+                    apply_output_budget("agent:oe:demo", count, items.clone(), &defaults, budget);
+                assert_eq!(
+                    actual, old,
+                    "case={case} budget={budget:?}: truncated/complete item and cursor differs"
+                );
+                if actual["output_truncated"] == true {
+                    truncated += 1;
+                } else {
+                    complete += 1;
+                }
+            }
+        }
+        assert!(complete > 0);
+        assert!(truncated > 0);
+    }
+
+    #[test]
+    fn in_place_search_summaries_match_frozen_selection_at_all_budgets() {
+        let queries = (0..4).map(|i| test_query(i, None)).collect::<Vec<_>>();
+        let summaries = vec![
+            json!({"index": 1, "success": true, "result_mode": "matches",
+                   "returned_match_count": 20, "truncated": false}),
+            json!({"index": 2, "success": false, "reason_code": "timeout",
+                   "detail_code": "timeout", "failure_stage": "agent_transport"}),
+            json!({"index": 3, "success": true, "result_mode": "files_with_matches",
+                   "returned_file_count": 13, "truncated": false}),
+        ];
+        for heavy in [false, true] {
+            let mut original = batch_output(
+                "agent:oe:demo",
+                4,
+                vec![default_matches_item(0, 1, if heavy { 45_000 } else { 20 })],
+                true,
+                Some(1),
+                Some("batch_response_budget"),
+            );
+            original["session_hint"] = json!({"state": "keep"});
+            original["remaining_summaries"] = json!([{"obsolete": true}]);
+            let measure = |candidate: &Value| {
+                projected_batch_serialized_len_with_continuation(
+                    candidate,
+                    &[true; 4],
+                    "agent:oe:demo",
+                    &queries,
+                    Some("wc_sess_demo"),
+                    Some(256 * 1024),
+                )
+            };
+            let baseline = {
+                let mut empty = original.clone();
+                empty.as_object_mut().unwrap().remove("remaining_summaries");
+                measure(&empty)
+            };
+            for extra in [0usize, 20, 100, 500, 8 * 1024] {
+                let mut old = original.clone();
+                let mut actual = original.clone();
+                legacy_attach_bounded_remaining_summaries(
+                    &mut old,
+                    &summaries,
+                    baseline + extra,
+                    measure,
+                );
+                attach_bounded_remaining_summaries(
+                    &mut actual,
+                    &summaries,
+                    baseline + extra,
+                    measure,
+                );
+                assert_eq!(actual, old, "heavy={heavy} extra={extra}");
+                assert_eq!(actual["next_index"], 1);
+                assert_eq!(actual["session_hint"]["state"], "keep");
+            }
+        }
+    }
+
+    #[test]
+    fn owned_search_budget_matches_frozen_canonical_and_parser_follow_up() {
+        let scenarios = [
+            vec![
+                default_matches_item(0, 1, 15),
+                files_item(1, 3),
+                count_item(2, 9),
+            ],
+            vec![
+                default_matches_item(0, 1, 8_000),
+                default_matches_item(1, 120, 900),
+                default_matches_item(2, 0, 16),
+                files_item(3, 4),
+            ],
+            (0..8).map(|i| default_matches_item(i, 1, 9_000)).collect(),
+            vec![
+                default_matches_item(0, 1, 120 * 1024),
+                json!({"index": 1, "success": false, "output": null, "error": "failed"}),
+                count_item(2, 10),
+            ],
+        ];
+        let mut saw_summary = 0;
+        let mut saw_full = 0;
+        for items in scenarios {
+            let count = items.len();
+            let timeouts = vec![true; count];
+            let queries = (0..count).map(|i| test_query(i, None)).collect::<Vec<_>>();
+            for budget in [
+                None,
+                Some(0),
+                Some(256 * 1024),
+                Some(MAX_SERIALIZED_OUTPUT_BYTES),
+            ] {
+                let mut base = ToolResult::ok(batch_output(
+                    "agent:oe:demo",
+                    count,
+                    items.clone(),
+                    false,
+                    None,
+                    None,
+                ));
+                base.output["session_hint"] = json!({
+                    "todo": 3, "unicode": "界🦀", "future": "retain"
+                });
+                base.output["job_attention"] = json!({"status": "ready"});
+                base.output["future_payload_safe_metadata"] = json!({"count": 13});
+                let mut old = ToolResult::ok(base.output.clone());
+                let mut actual = base;
+                legacy_apply_model_facing_output_budget(
+                    &mut old,
+                    &timeouts,
+                    budget,
+                    "agent:oe:demo",
+                    &queries,
+                    Some("wc_sess_search_budget"),
+                );
+                apply_model_facing_output_budget(
+                    &mut actual,
+                    &timeouts,
+                    budget,
+                    "agent:oe:demo",
+                    &queries,
+                    Some("wc_sess_search_budget"),
+                );
+                assert_eq!(actual.output, old.output,
+                    "canonical output must match previous clone-based processing: budget={budget:?} count={count}");
+                saw_summary += usize::from(actual.output.get("remaining_summaries").is_some());
+                saw_full += usize::from(actual.output["output_truncated"] == false);
+                for result in [&mut actual, &mut old] {
+                    super::super::result_projection::sparsify_search_batch_success_for_model(
+                        &timeouts, result,
+                    );
+                    add_actionable_search_continuation(
+                        result,
+                        "agent:oe:demo",
+                        &queries,
+                        Some("wc_sess_search_budget"),
+                        budget,
+                    );
+                }
+                assert_eq!(
+                    actual.output, old.output,
+                    "parser-ready projection and complete follow-up must be identical"
+                );
+                if let Some(call) = actual.output.get("suggested_call") {
+                    assert_eq!(call["tool"], "search_project_texts");
+                    crate::tool_runtime::ToolCall::from_tool_name(
+                        "search_project_texts",
+                        call["arguments"].clone(),
+                    )
+                    .expect("whole-query suffix follow-up should parse");
+                }
+            }
+        }
+        assert!(
+            saw_summary > 0,
+            "some fixture must attach bounded summaries"
+        );
+        assert!(saw_full > 0, "some fixture must keep a complete response");
     }
 
     #[test]
