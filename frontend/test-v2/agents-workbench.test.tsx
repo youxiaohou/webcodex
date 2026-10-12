@@ -8,12 +8,12 @@ import { UiProvider } from "../src/ui/UiProvider.js";
 const ok = (data: unknown) => ({ ok: true, status: 200, data });
 const agents = [{ agent_id: "agent-a", handle: "reviewer", display_name: "Reviewer", profile_revision: 4, queued_delivery_count: 2 }];
 const conversations = [{ conversation_id: "a", title: "Release review", last_seq: 1 }, { conversation_id: "b", title: "Design review", last_seq: 1 }];
-function clientFor(detail: (id: string) => unknown, mutations?: (path: string, payload: any) => unknown) {
-  return { post: vi.fn(async (path: string, payload: any) => {
+function clientFor(detail: (id: string) => unknown, mutations?: (path: string, payload: any, signal?: AbortSignal) => unknown) {
+  return { post: vi.fn(async (path: string, payload: any, signal?: AbortSignal) => {
     if (path === "communication/agents") return ok({ agents });
     if (path === "communication/conversations") return ok({ conversations });
     if (path === "communication/conversation") return detail(payload.conversation_id);
-    return mutations?.(path, payload) ?? ok({});
+    return mutations?.(path, payload, signal) ?? ok({});
   }) } as unknown as RuntimeV2Client;
 }
 
@@ -249,6 +249,126 @@ it("does not repeat an in-flight inbox request or poll without an attached Agent
     expect(hook.result.current.inbox).toHaveLength(1);
   } finally {
     unmount(); vi.useRealTimers();
+  }
+});
+
+it("keeps a slow inbox read alive across inventory ticks and coalesces explicit refreshes", async () => {
+  vi.useFakeTimers();
+  let unmount = () => {};
+  try {
+    let resolveInbox!: (value: unknown) => void;
+    const pending = new Promise(resolve => { resolveInbox = resolve; });
+    const attached = { endpoint_id: "endpoint-cross-tick", controller_generation: 1, lifecycle: "attached" };
+    const signals: AbortSignal[] = [];
+    let reads = 0;
+    const client = clientFor(() => ok({ messages: [] }), (path, _payload, signal) => {
+      if (path === "communication/endpoint/attach" || path === "communication/endpoint/renew") return ok({ endpoint: attached });
+      if (path === "communication/inbox") {
+        if (signal) signals.push(signal);
+        reads += 1;
+        if (reads === 2) return pending;
+        return ok({ deliveries: reads === 1 ? [] : [{ delivery_id: "latest" }] });
+      }
+      return ok({});
+    });
+    const unauthorized = vi.fn();
+    const hook = renderHook(() => useAgentWorkspace(client, true, unauthorized));
+    unmount = hook.unmount;
+    await act(async () => {});
+    await act(async () => { expect(await hook.result.current.attach()).toBe(true); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(reads).toBe(2);
+    // The 30s inventory tick must not abort the inbox read started at 10s.
+    await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
+    expect(reads).toBe(2);
+    expect(signals[1].aborted).toBe(false);
+    act(() => { hook.result.current.refresh(); hook.result.current.refresh(); });
+    await act(async () => {});
+    expect(reads).toBe(2);
+    expect(signals[1].aborted).toBe(false);
+    await act(async () => resolveInbox(ok({ deliveries: [{ delivery_id: "previous-snapshot" }] })));
+    // A refresh requested during the read is coalesced, not discarded.
+    expect(reads).toBe(3);
+    expect(hook.result.current.inbox).toEqual([{ delivery_id: "latest" }]);
+  } finally {
+    unmount(); vi.useRealTimers();
+  }
+});
+
+it("aborts an old inbox read on Endpoint replacement and ignores its late error", async () => {
+  vi.useFakeTimers();
+  let unmount = () => {};
+  try {
+    let resolveOld!: (value: unknown) => void;
+    const pending = new Promise(resolve => { resolveOld = resolve; });
+    let attachments = 0;
+    let oldSignal: AbortSignal | undefined;
+    const client = clientFor(() => ok({ messages: [] }), (path, payload, signal) => {
+      if (path === "communication/endpoint/attach") {
+        attachments += 1;
+        return ok({ endpoint: { endpoint_id: "endpoint-" + attachments, controller_generation: attachments, lifecycle: "attached" } });
+      }
+      if (path === "communication/inbox") {
+        if (payload.endpoint_id === "endpoint-1") { oldSignal = signal; return pending; }
+        return ok({ deliveries: [{ delivery_id: "current-endpoint" }] });
+      }
+      return ok({});
+    });
+    const unauthorized = vi.fn();
+    const hook = renderHook(({ enabled }) => useAgentWorkspace(client, enabled, unauthorized), { initialProps: { enabled: true } });
+    unmount = hook.unmount;
+    await act(async () => {});
+    await act(async () => { expect(await hook.result.current.attach()).toBe(true); });
+    expect(oldSignal?.aborted).toBe(false);
+    await act(async () => { expect(await hook.result.current.detach()).toBe(true); });
+    expect(oldSignal?.aborted).toBe(true);
+    await act(async () => { expect(await hook.result.current.attach()).toBe(true); });
+    expect(hook.result.current.endpoint?.endpoint_id).toBe("endpoint-2");
+    await act(async () => resolveOld({ ok: false, status: 400 }));
+    expect(hook.result.current.endpoint?.endpoint_id).toBe("endpoint-2");
+    expect(hook.result.current.inbox).toEqual([{ delivery_id: "current-endpoint" }]);
+    hook.rerender({ enabled: false });
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(hook.result.current.inbox).toEqual([]);
+    expect(unauthorized).not.toHaveBeenCalled();
+  } finally {
+    unmount(); vi.useRealTimers();
+  }
+});
+
+it("does not launch a queued inbox refresh after the view becomes hidden", async () => {
+  vi.useFakeTimers();
+  const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+  let unmount = () => {};
+  try {
+    let resolveInbox!: (value: unknown) => void;
+    const pending = new Promise(resolve => { resolveInbox = resolve; });
+    const attached = { endpoint_id: "endpoint-queued-hidden", controller_generation: 1, lifecycle: "attached" };
+    let reads = 0;
+    const client = clientFor(() => ok({ messages: [] }), path => {
+      if (path === "communication/endpoint/attach" || path === "communication/endpoint/renew") return ok({ endpoint: attached });
+      if (path === "communication/inbox") { reads += 1; return reads === 1 ? pending : ok({ deliveries: [] }); }
+      return ok({});
+    });
+    const unauthorized = vi.fn();
+    const hook = renderHook(() => useAgentWorkspace(client, true, unauthorized));
+    unmount = hook.unmount;
+    await act(async () => {});
+    await act(async () => { expect(await hook.result.current.attach()).toBe(true); });
+    act(() => hook.result.current.refresh());
+    await act(async () => {});
+    expect(reads).toBe(1);
+    visibility.mockReturnValue("hidden");
+    act(() => document.dispatchEvent(new Event("visibilitychange")));
+    await act(async () => resolveInbox(ok({ deliveries: [] })));
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    expect(reads).toBe(1);
+    visibility.mockReturnValue("visible");
+    act(() => document.dispatchEvent(new Event("visibilitychange")));
+    await act(async () => { await vi.advanceTimersByTimeAsync(150); });
+    expect(reads).toBe(2);
+  } finally {
+    unmount(); visibility.mockRestore(); vi.useRealTimers();
   }
 });
 

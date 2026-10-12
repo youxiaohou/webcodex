@@ -79,6 +79,7 @@ export function useAgentWorkspace(
   const request = useRef<AbortController | null>(null);
   const refreshQueued = useRef(false);
   const inboxPending = useRef<AbortController | null>(null);
+  const inboxRefreshQueued = useRef(false);
   const pendingAgentCreate = useRef<PendingKey>(null);
   const pendingConversationCreate = useRef<PendingKey>(null);
   const pendingMessage = useRef<PendingKey>(null);
@@ -196,9 +197,15 @@ export function useAgentWorkspace(
     return () => controller.abort();
   }, [client, enabled, onUnauthorized, refresh, selectedConversation?.last_seq, selectedConversationId, revision]);
 
-  useEffect(() => {
+  const refreshInbox = useCallback(() => {
     if (!enabled || !selectedAgentId || !endpoint) {
       setInbox([]);
+      return;
+    }
+    // Inventory/manual refreshes share the inbox's single-flight boundary.
+    // A refresh is not a scope change and must not abort a slow observation.
+    if (inboxPending.current) {
+      inboxRefreshQueued.current = true;
       return;
     }
     const controller = new AbortController();
@@ -226,13 +233,26 @@ export function useAgentWorkspace(
         setInbox(Array.isArray(response.data.deliveries) ? response.data.deliveries : []);
       }
     }).finally(() => {
-      if (inboxPending.current === controller) inboxPending.current = null;
+      if (inboxPending.current !== controller) return;
+      inboxPending.current = null;
+      if (inboxRefreshQueued.current) {
+        inboxRefreshQueued.current = false;
+        // Foreground resumption will refresh a paused view. Do not start a
+        // queued observation after the page has become hidden.
+        if (document.visibilityState !== "hidden") setInboxRevision((value) => value + 1);
+      }
     });
-    return () => {
-      controller.abort();
-      if (inboxPending.current === controller) inboxPending.current = null;
-    };
-  }, [client, enabled, endpoint?.controller_generation, endpoint?.endpoint_id, onUnauthorized, selectedAgentId, revision, inboxRevision]);
+  }, [client, enabled, endpoint?.controller_generation, endpoint?.endpoint_id, onUnauthorized, selectedAgentId]);
+
+  // Only identity/client/authority changes and disposal cancel an inbox read.
+  // Ordinary refresh revisions are deliberately absent from this cleanup.
+  useEffect(() => () => {
+    inboxPending.current?.abort();
+    inboxPending.current = null;
+    inboxRefreshQueued.current = false;
+  }, [refreshInbox]);
+
+  useEffect(() => { refreshInbox(); }, [refreshInbox, revision, inboxRevision]);
 
   // An attached, foreground Agent needs prompt delivery observations. Poll
   // only the selected inbox, not full Agent/Conversation inventories; never

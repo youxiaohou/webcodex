@@ -55,3 +55,19 @@ The canonical right next action for real-world validation is to measure
 message-post timestamp to visible inbox presentation with the same backend,
 authentication and foreground-tab conditions on both versions. Keep
 read-only capability and stale Endpoint fences unchanged.
+
+## Maintainer review: shared refresh boundary
+
+The initial single-flight check covered only the new 10s timer. A deterministic
+review regression started a slow inbox read at 10s, then advanced through the
+existing 30s inventory tick. The submitted implementation aborted that read
+and started a third request instead of retaining the second. The same test
+passes after separating scope cleanup from ordinary refresh revisions.
+
+All inbox refresh sources now share one pending read and at most one queued
+refresh. Inventory and explicit refreshes do not abort that observation;
+Endpoint/client/authority changes and disposal still abort it and reject late
+responses. A queued refresh does not start after the page becomes hidden.
+Additional tests cover queued-refresh coalescing, a late error from a replaced
+Endpoint, disabled views, and hidden-to-visible resumption. The independent
+Endpoint renewal cadence and business mutation/replay behavior are unchanged.
