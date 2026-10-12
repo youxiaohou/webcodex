@@ -1,6 +1,7 @@
 //! Borrowed projection parity and an opt-in cost comparison against the parent.
 use super::*;
 use serde_json::json;
+mod console_no_validation_tests;
 mod reference;
 use reference::reference_summary;
 
