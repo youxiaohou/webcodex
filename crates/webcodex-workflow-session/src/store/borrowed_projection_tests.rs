@@ -350,3 +350,76 @@ fn closed_console_list_cache_repeated_read_cost_comparison() {
         payload_bytes,
     );
 }
+
+#[test]
+#[ignore = "manual repeated multi-Session Console inventory benchmark with 60 Closed identities"]
+fn closed_console_multi_session_batch_cost_comparison() {
+    let store = SessionStore::new_in_memory_with_limits(2, 100, 2_000);
+    let ids = (0..60)
+        .map(|_| {
+            let record = fixture(200);
+            let id = record.session_id.clone();
+            store.inner.lock().unwrap().insert_session(record);
+            store.close_session(&id).unwrap();
+            id
+        })
+        .collect::<Vec<_>>();
+    let hooks = cache_hooks(false);
+    let projects = ["project"];
+    let initial = store.console_lists_for_projects(&projects, Some(100), hooks);
+    assert_eq!(initial["project"].returned, ids.len());
+    assert!(initial["project"]
+        .sessions
+        .iter()
+        .all(|row| row.lifecycle == "closed"));
+    let encoded = serde_json::to_vec(&initial).unwrap();
+    let mut uncached_ns = 0_u128;
+    let mut cached_ns = 0_u128;
+    let iterations = 8_u128;
+    for round in 0..iterations {
+        // The actual batch inventory implementation is identical in both
+        // cases; only the transient memoized Closed projections are cleared.
+        if round % 2 == 0 {
+            {
+                let inner = store.inner.lock().unwrap();
+                for id in &ids {
+                    let StoredSession::Cold(cold) = inner.sessions.get(id).unwrap() else {
+                        panic!("Closed identity must remain cold");
+                    };
+                    *cold.console_list_cache.lock().unwrap() = None;
+                }
+            }
+            let start = Instant::now();
+            let baseline = store.console_lists_for_projects(&projects, Some(100), hooks);
+            uncached_ns += start.elapsed().as_nanos();
+            assert_eq!(serde_json::to_vec(&baseline).unwrap(), encoded);
+        }
+        let start = Instant::now();
+        let warmed = store.console_lists_for_projects(&projects, Some(100), hooks);
+        cached_ns += start.elapsed().as_nanos();
+        assert_eq!(serde_json::to_vec(&warmed).unwrap(), encoded);
+        if round % 2 != 0 {
+            {
+                let inner = store.inner.lock().unwrap();
+                for id in &ids {
+                    let StoredSession::Cold(cold) = inner.sessions.get(id).unwrap() else {
+                        panic!("Closed identity must remain cold");
+                    };
+                    *cold.console_list_cache.lock().unwrap() = None;
+                }
+            }
+            let start = Instant::now();
+            let baseline = store.console_lists_for_projects(&projects, Some(100), hooks);
+            uncached_ns += start.elapsed().as_nanos();
+            assert_eq!(serde_json::to_vec(&baseline).unwrap(), encoded);
+        }
+    }
+    println!(
+        "console_batch sessions={} events_per_session=200 uncached_avg_ms={:.3} cached_avg_ms={:.3} speedup={:.2}x response_bytes={}",
+        ids.len(),
+        uncached_ns as f64 / iterations as f64 / 1e6,
+        cached_ns as f64 / iterations as f64 / 1e6,
+        uncached_ns as f64 / cached_ns as f64,
+        encoded.len(),
+    );
+}
