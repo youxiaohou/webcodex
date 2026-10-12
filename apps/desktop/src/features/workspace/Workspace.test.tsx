@@ -419,8 +419,11 @@ describe("product workspace task flows", () => {
     api.prepareProjectUnregister.mockImplementation(() => new Promise(resolve => { resolveObservation = resolve; }));
     const onState = vi.fn();
     const { rerender } = render(wrap(<ProjectsPanel onState={onState} />));
-    await screen.findByRole("button", { name: "Remove project beta" });
+    // Saved registrations render before the asynchronous Runner inventory.
+    // Wait until the observed project is connected and removal is actionable.
+    await waitFor(() => expect(screen.getByRole("button", { name: "Remove project beta" })).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: "Remove project beta" }));
+    expect(api.prepareProjectUnregister).toHaveBeenCalledTimes(1);
     const next = { ...state, workspace_runner: { ...state.workspace_runner!, client_id: "other" } };
     rerender(wrap(<ProjectsPanel onState={onState} />, next));
     await act(async () => resolveObservation({ target: state.workspace_runner, project: beta.id, expected_revision: "sha256:" + "a".repeat(64), path: beta.path }));
@@ -434,7 +437,8 @@ describe("product workspace task flows", () => {
     const observation = (project: string) => ({ target: state.workspace_runner, project, path: beta.path, expected_revision: "sha256:" + "a".repeat(64) });
     const onState = vi.fn();
     const { rerender } = render(wrap(<ProjectsPanel onState={onState} />));
-    await screen.findByRole("button", { name: "Remove project beta" });
+    // Presence does not imply readiness: saved projects start disconnected.
+    await waitFor(() => expect(screen.getByRole("button", { name: "Remove project beta" })).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: "Remove project beta" }));
     expect(pending).toHaveLength(1);
     const next = { ...state, workspace_runner: { ...state.workspace_runner!, config_path: "other.toml" } };
@@ -459,7 +463,8 @@ describe("product workspace task flows", () => {
     api.prepareProjectUnregister.mockImplementation(() => new Promise(resolve => { resolveSingle = resolve; }));
     const onState = vi.fn();
     const { rerender } = render(wrap(<ProjectsPanel onState={onState} />));
-    await screen.findByRole("button", { name: "Select / deselect visible" });
+    // The local saved rows are not removable until the Runner inventory lands.
+    await waitFor(() => expect(screen.getByRole("button", { name: "Select / deselect visible" })).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: "Select / deselect visible" }));
     fireEvent.click(screen.getByRole("button", { name: "Remove selected (2)" }));
     expect(api.prepareProjectsUnregister).toHaveBeenCalledTimes(1);
@@ -502,8 +507,9 @@ describe("product workspace task flows", () => {
     api.prepareProjectUnregister.mockImplementation(() => new Promise(resolve => { resolveObservation = resolve; }));
     const onState = vi.fn();
     const { rerender } = render(wrap(<ProjectsPanel onState={onState} />));
-    await screen.findByRole("button", { name: "Remove project beta" });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Remove project beta" })).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: "Remove project beta" }));
+    expect(api.prepareProjectUnregister).toHaveBeenCalledTimes(1);
     const next = { ...state, workspace_runner: { ...state.workspace_runner!, config_path: "other.toml" } };
     rerender(wrap(<ProjectsPanel onState={onState} />, next));
     await waitFor(() => expect(screen.getByRole("button", { name: "Remove project beta" })).toBeEnabled());
@@ -528,7 +534,10 @@ describe("product workspace task flows", () => {
     await screen.findByRole("checkbox", { name: "Select project-16" });
     fireEvent.click(screen.getByRole("button", { name: "Select / deselect visible" }));
     fireEvent.click(screen.getByRole("button", { name: "Remove selected (17)" }));
-    const dialog = await screen.findByRole("dialog", { name: "Remove selected (17)" });
+    // Confirm the large batch dialog and its title separately. Mantine can
+    // register the dialog accessibility label after the content has mounted.
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByRole("heading", { name: "Remove selected (17)" })).toBeInTheDocument();
     expect(api.prepareProjectsUnregister.mock.calls.map(([ids]) => ids.length)).toEqual([16, 1]);
     expect(api.unregisterProjects).not.toHaveBeenCalled();
     fireEvent.click(within(dialog).getByRole("button", { name: "Remove selected (17)" }));
@@ -536,7 +545,7 @@ describe("product workspace task flows", () => {
     expect(api.unregisterProjects.mock.calls.map(([items]) => items.length)).toEqual([16, 1]);
     expect(api.unregisterProjects.mock.calls.flatMap(([items]) => items)).toEqual(projects.map(row => observation(row.id)));
     expect(api.prepareProjectsUnregister).toHaveBeenCalledTimes(2);
-  });
+  }, 15_000); // 17 rendered rows and two bounded batches under concurrent CI workers.
 
   it("selects visible projects and stops a batch after the first unconfirmed removal", async () => {
     const target = { config_path: "fixture.toml", client_id: "mini", server_url: "http://localhost" };
