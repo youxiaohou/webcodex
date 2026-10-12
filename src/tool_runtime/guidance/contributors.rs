@@ -42,7 +42,7 @@ pub(super) static DIRECT: GuidanceContributor = GuidanceContributor {
     items: &[
         "Inspect → act → review → validate → deliver. Non-Git: list_project_files/read_files; Git/validation/commits as needed.",
         "Text source edits: read_files → edit_project_files with its read_revision fence; use exact edits for unique text and replace_range for deterministic whole-line rewrites. Review with review_changes when Git review is useful.",
-        "binary files: artifact import/export or transfer_project_artifact; never rename or transform via text edits. Use run_script/Python for computations; independently verify generated/report outputs.",
+        "binary files: artifact import/export or transfer_project_artifact; never rename or transform binaries via text edits. Use run_script/Python for computations; independently verify generated/report outputs.",
         "Never use scripts to bypass edit_project_files revision fences, rollback, or sensitive-path policy.",
         "Coalesce: read_files(items), search_project_texts(queries), search_file_context, project_validate with scope.packages, one edit_project_files batch. Keep result-dependent operations sequential. Avoid ritual turns.",
         "Simple observation: direct primitive. Batch predetermined independent observations; fixed read-only CLI: run_shell with exit checks. One literal command: run_process.",
