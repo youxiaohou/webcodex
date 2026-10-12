@@ -43,12 +43,29 @@ pub async fn observe(
     runtime: &StoredRuntime,
     project: &str,
 ) -> DesktopResult<UnregisterObservation> {
+    observe_many(runtime, &[project.to_owned()])
+        .await?
+        .pop()
+        .ok_or_else(unavailable)
+}
+
+pub async fn observe_many(
+    runtime: &StoredRuntime,
+    projects: &[String],
+) -> DesktopResult<Vec<UnregisterObservation>> {
     let target = settings::target(runtime)?;
-    if project.len() > 512
-        || project.chars().any(char::is_control)
-        || !project.starts_with(&format!("agent:{}:", target.client_id))
-    {
+    if projects.is_empty() || projects.len() > 16 {
         return Err(unavailable());
+    }
+    let mut seen = std::collections::HashSet::new();
+    for project in projects {
+        if project.len() > 512
+            || project.chars().any(char::is_control)
+            || !project.starts_with(&format!("agent:{}:", target.client_id))
+            || !seen.insert(project.as_str())
+        {
+            return Err(unavailable());
+        }
     }
     let value = crate::workspace::post(
         runtime,
@@ -60,36 +77,40 @@ pub async fn observe(
     if value.get("success").and_then(Value::as_bool) != Some(true) {
         return Err(unavailable());
     }
-    let row = value
+    let rows = value
         .pointer("/output/projects")
         .and_then(Value::as_array)
-        .and_then(|rows| {
-            rows.iter()
+        .ok_or_else(unavailable)?;
+    projects
+        .iter()
+        .map(|project| {
+            let row = rows
+                .iter()
                 .find(|row| row.get("id").and_then(Value::as_str) == Some(project))
+                .ok_or_else(unavailable)?;
+            let revision = row
+                .get("revision")
+                .and_then(Value::as_str)
+                .filter(|s| {
+                    s.len() == 71
+                        && s.starts_with("sha256:")
+                        && s[7..].bytes().all(|b| b.is_ascii_hexdigit())
+                })
+                .ok_or_else(unavailable)?;
+            let path = row
+                .get("path")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(unavailable)?;
+            Ok(UnregisterObservation {
+                target: target.clone(),
+                project: project.clone(),
+                expected_revision: revision.to_owned(),
+                path: path.to_owned(),
+            })
         })
-        .ok_or_else(unavailable)?;
-    let revision = row
-        .get("revision")
-        .and_then(Value::as_str)
-        .filter(|s| {
-            s.len() == 71
-                && s.starts_with("sha256:")
-                && s[7..].bytes().all(|b| b.is_ascii_hexdigit())
-        })
-        .ok_or_else(unavailable)?;
-    let path = row
-        .get("path")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(unavailable)?;
-    Ok(UnregisterObservation {
-        target,
-        project: project.to_owned(),
-        expected_revision: revision.to_owned(),
-        path: path.to_owned(),
-    })
+        .collect()
 }
-
 pub async fn unregister(
     runtime: &StoredRuntime,
     request: &UnregisterRequest,
@@ -132,6 +153,108 @@ pub async fn unregister(
         }
     }
     Ok(observation.path)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BatchUnregisterRequest {
+    pub items: Vec<UnregisterRequest>,
+}
+
+#[derive(Serialize)]
+pub struct BatchUnregisterResult {
+    pub items: Vec<BatchUnregisterItem>,
+    pub state: crate::models::DesktopStateSnapshot,
+}
+
+#[derive(Serialize)]
+pub struct BatchUnregisterItem {
+    pub project: String,
+    pub success: bool,
+    pub status: String,
+}
+
+pub async fn unregister_batch(
+    runtime: &StoredRuntime,
+    requests: &[UnregisterRequest],
+) -> DesktopResult<Vec<BatchUnregisterItem>> {
+    if requests.is_empty() || requests.len() > 16 {
+        return Err(unavailable());
+    }
+    let mut ids = std::collections::HashSet::new();
+    for request in requests {
+        settings::verify_target(runtime, &request.target)?;
+        if !request.confirmed
+            || !ids.insert(request.project.as_str())
+            || request.project.len() > 512
+            || !request
+                .project
+                .starts_with(&format!("agent:{}:", request.target.client_id))
+            || request.expected_revision.len() != 71
+            || !request.expected_revision.starts_with("sha256:")
+            || !request.expected_revision[7..]
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(unavailable());
+        }
+    }
+    let items: Vec<Value> = requests
+        .iter()
+        .map(|item| json!({"project":item.project,"expected_revision":item.expected_revision}))
+        .collect();
+    let response = crate::workspace::post(runtime, "/api/tools/call",
+        json!({"tool":"unregister_projects","params":{"items":items,"dry_run":false,"confirm":true}}),
+        Duration::from_secs(120)).await.map_err(|_| uncertain())?;
+    let results = response
+        .pointer("/output/items")
+        .and_then(Value::as_array)
+        .ok_or_else(uncertain)?;
+    if results.len() != requests.len() {
+        return Err(uncertain());
+    }
+    let mut parsed = Vec::with_capacity(requests.len());
+    for (index, (item, request)) in results.iter().zip(requests.iter()).enumerate() {
+        if item.get("project").and_then(Value::as_str) != Some(request.project.as_str())
+            || item.get("index").and_then(Value::as_u64) != Some(index as u64)
+        {
+            return Err(uncertain());
+        }
+        let success = item
+            .get("success")
+            .and_then(Value::as_bool)
+            .ok_or_else(uncertain)?;
+        let status = if success {
+            let outcome = item
+                .pointer("/output/outcome")
+                .and_then(Value::as_str)
+                .ok_or_else(uncertain)?;
+            if !matches!(outcome, "unregistered" | "already_unregistered") {
+                return Err(uncertain());
+            }
+            outcome
+        } else {
+            match item
+                .pointer("/output/error/code")
+                .and_then(Value::as_str)
+                .or_else(|| item.get("error").and_then(Value::as_str))
+            {
+                Some("not_attempted_after_uncertain_outcome") => {
+                    "not_attempted_after_uncertain_outcome"
+                }
+                Some("active_jobs_conflict") => "active_jobs_conflict",
+                Some("revision_conflict") => "revision_conflict",
+                Some("project_not_found") => "project_not_found",
+                _ => "failed_or_unconfirmed",
+            }
+        };
+        parsed.push(BatchUnregisterItem {
+            project: request.project.clone(),
+            success,
+            status: status.to_owned(),
+        });
+    }
+    Ok(parsed)
 }
 
 pub fn forget(config: &mut StoredDesktopConfig, project: &str, path: &str) {

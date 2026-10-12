@@ -823,6 +823,25 @@ pub async fn prepare_project_unregister(
 }
 
 #[tauri::command]
+pub async fn prepare_projects_unregister(
+    projects: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::project_inventory::UnregisterObservation>, DesktopError> {
+    state.prepare_projects_unregister(projects).await
+}
+
+#[tauri::command]
+pub async fn unregister_projects(
+    request: crate::project_inventory::BatchUnregisterRequest,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<crate::project_inventory::BatchUnregisterResult, DesktopError> {
+    let result = state.unregister_projects(request).await?;
+    tray::refresh_from_snapshot(&app, &result.state);
+    Ok(result)
+}
+
+#[tauri::command]
 pub async fn unregister_project(
     request: crate::project_inventory::UnregisterRequest,
     app: AppHandle,

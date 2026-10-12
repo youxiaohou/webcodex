@@ -66,6 +66,94 @@ impl AppState {
         Ok(observation)
     }
 
+    pub async fn prepare_projects_unregister(
+        &self,
+        projects: Vec<String>,
+    ) -> DesktopResult<Vec<crate::project_inventory::UnregisterObservation>> {
+        if self.operations.current().is_some() || self.shutdown_signal.is_cancelled() {
+            return Err(crate::workspace::unavailable());
+        }
+        let runtime = {
+            let slot = self.core.lock().await;
+            slot.as_ref()
+                .and_then(|core| core.config.runtime.clone())
+                .ok_or_else(crate::workspace::unavailable)?
+        };
+        let observations = crate::project_inventory::observe_many(&runtime, &projects).await?;
+        let slot = self.core.lock().await;
+        if self.operations.current().is_some()
+            || self.shutdown_signal.is_cancelled()
+            || slot.as_ref().and_then(|core| core.config.runtime.as_ref()) != Some(&runtime)
+        {
+            return Err(crate::workspace::unavailable());
+        }
+        Ok(observations)
+    }
+
+    pub async fn unregister_projects(
+        &self,
+        request: crate::project_inventory::BatchUnregisterRequest,
+    ) -> DesktopResult<crate::project_inventory::BatchUnregisterResult> {
+        let (operation, cancellation, mut core, baseline) = self
+            .begin_operation(DesktopOperationKind::ProjectUnregister, false)
+            .await?;
+        let result = async {
+            if core.config.persistent_environment.is_some() {
+                return Err(crate::workspace::unavailable());
+            }
+            let runtime = core
+                .config
+                .runtime
+                .clone()
+                .ok_or_else(crate::workspace::unavailable)?;
+            // Capture exact identity and path before mutation; a revision conflict
+            // must never be treated as confirmation of removal.
+            let ids: Vec<String> = request
+                .items
+                .iter()
+                .map(|item| item.project.clone())
+                .collect();
+            let observations = crate::project_inventory::observe_many(&runtime, &ids).await?;
+            for (item, observed) in request.items.iter().zip(observations.iter()) {
+                if observed.expected_revision != item.expected_revision {
+                    return Err(crate::workspace::unavailable());
+                }
+            }
+            let items =
+                crate::project_inventory::unregister_batch(&runtime, &request.items).await?;
+            for (item, observed) in items.iter().zip(observations.iter()) {
+                if item.success {
+                    crate::project_inventory::forget(
+                        &mut core.config,
+                        &item.project,
+                        &observed.path,
+                    );
+                }
+            }
+            if items.iter().any(|item| item.success) {
+                core.clear_absent_project_observation();
+                core.inventory_persistence_pending = true;
+                if core.save_config().await.is_ok() {
+                    core.inventory_persistence_pending = false;
+                }
+            }
+            Ok(crate::project_inventory::BatchUnregisterResult {
+                items,
+                state: core.get_state().await?,
+            })
+        }
+        .await;
+        // Preserve the operation lifecycle even for partial and unconfirmed outcomes.
+        let (items, snapshot) = match result {
+            Ok(value) => (value.items, Ok(value.state)),
+            Err(error) => (Vec::new(), Err(error)),
+        };
+        let state = self
+            .finish_operation(operation, cancellation, core, baseline, snapshot)
+            .await?;
+        Ok(crate::project_inventory::BatchUnregisterResult { items, state })
+    }
+
     pub async fn unregister_project(
         &self,
         request: crate::project_inventory::UnregisterRequest,

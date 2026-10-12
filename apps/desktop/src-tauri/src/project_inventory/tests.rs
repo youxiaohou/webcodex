@@ -92,6 +92,45 @@ fn inventory() -> Value {
 }
 
 #[tokio::test]
+async fn batch_uses_single_request_and_preserves_partial_outcomes() {
+    let (url, task) = server(vec![json!({"success":false,"output":{"items":[
+        {"index":0,"project":"agent:mini:repo","success":true,"output":{"outcome":"unregistered"}},
+        {"index":1,"project":"agent:mini:other","success":false,"error":"active_jobs_conflict"}
+    ],"outcome_unknown":false}})])
+    .await;
+    let fixture = Fixture::new(url);
+    let one = fixture.request();
+    let mut two = fixture.request();
+    two.project = "agent:mini:other".into();
+    let results = unregister_batch(&fixture.runtime, &[one, two])
+        .await
+        .unwrap();
+    assert!(results[0].success);
+    assert!(!results[1].success);
+    let calls = task.await.unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0]["tool"], "unregister_projects");
+    assert_eq!(calls[0]["params"]["dry_run"], true == false);
+    assert_eq!(calls[0]["params"]["confirm"], true);
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("keep.txt")).unwrap(),
+        "user files stay"
+    );
+}
+
+#[tokio::test]
+async fn observe_many_uses_one_inventory_request() {
+    let (url, task) = server(vec![inventory()]).await;
+    let fixture = Fixture::new(url);
+    let rows = observe_many(&fixture.runtime, &["agent:mini:repo".to_owned()])
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].path, "D:\\repo");
+    assert_eq!(task.await.unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn unregister_uses_exact_revision_and_keeps_files() {
     let (url, task) = server(vec![
         inventory(),

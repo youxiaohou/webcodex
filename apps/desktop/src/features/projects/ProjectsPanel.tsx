@@ -50,6 +50,10 @@ export function ProjectsPanel({ onComputerSettings, onState }: { onComputerSetti
   const [removal, setRemoval] = useState<UnregisterObservation | null>(null);
   const [removing, setRemoving] = useState(false);
   const [removeError, setRemoveError] = useState(false);
+  const [selected, setSelected] = useState<string[]>([]);
+  const [batchConfirm, setBatchConfirm] = useState(false);
+  const [batchProgress, setBatchProgress] = useState("");
+  const [batchIssues, setBatchIssues] = useState<string[]>([]);
   const canManageProjects = Boolean(onState && workspace.state.workspace_runner);
 
   const prepareRemoval = async (project: WorkspaceProject) => {
@@ -81,6 +85,59 @@ export function ProjectsPanel({ onComputerSettings, onState }: { onComputerSetti
     }
   };
 
+  const unregisterSelected = async () => {
+    if (!onState || removing || workspace.state.current_operation) return;
+    const ids = selected.filter(id => workspace.projects.some(project => project.id === id && project.connected && projectRunnerId(project) === workspace.state.workspace_runner?.client_id));
+    if (!ids.length) return;
+    setRemoving(true);
+    setRemoveError(false);
+    setBatchIssues([]);
+    setBatchConfirm(false);
+    try {
+      let completed = 0;
+      for (let offset = 0; offset < ids.length; offset += 16) {
+        const chunk = ids.slice(offset, offset + 16);
+        const observations = await desktopApi.prepareProjectsUnregister(chunk);
+        setBatchProgress(`${completed}/${ids.length}`);
+        if (workspace.state.persistent_environment) {
+          for (const observation of observations) {
+            try {
+              onState(await desktopApi.unregisterProject(observation));
+              workspace.removeProject(observation.project);
+              setSelected(current => current.filter(id => id !== observation.project));
+              completed++;
+              setBatchProgress(`${completed}/${ids.length}`);
+            } catch {
+              setRemoveError(true);
+              setBatchIssues([observation.project]);
+              return;
+            }
+          }
+        } else {
+          const result = await desktopApi.unregisterProjects(observations);
+          onState(result.state);
+          const succeeded = result.items.filter(item => item.success).map(item => item.project);
+          for (const id of succeeded) workspace.removeProject(id);
+          setSelected(current => current.filter(id => !succeeded.includes(id)));
+          completed += succeeded.length;
+          setBatchProgress(`${completed}/${ids.length}`);
+          const issues = result.items.filter(item => !item.success).map(item => `${item.project}: ${item.status}`);
+          if (issues.length || result.items.length !== chunk.length) {
+            setBatchIssues(issues.length ? issues : chunk);
+            setRemoveError(true);
+            return;
+          }
+        }
+      }
+    } catch {
+      setRemoveError(true);
+    } finally {
+      setBatchProgress("");
+      setRemoving(false);
+      workspace.refresh();
+    }
+  };
+
   const rows = workspace.projects.filter(project =>
     (!device || projectRunnerId(project) === device) &&
     `${projectName(project)} ${displayProjectPath(project.path)} ${projectRunnerId(project) || ""}`
@@ -102,8 +159,25 @@ export function ProjectsPanel({ onComputerSettings, onState }: { onComputerSetti
       {(device || query) && <button type="button" className="text-button" onClick={() => { selectDevice(""); setQuery(""); }}>{p("clearProjectFilters")}</button>}
     </div>
     {workspace.error && <div className="workspace-notice" role="alert">{p(workspace.errorReason)}</div>}
-    <ProjectRows projects={rows} onUnregister={canManageProjects ? prepareRemoval : undefined} busy={removing || Boolean(workspace.state.current_operation)} />
+    {canManageProjects && <div className="shell-actions">
+      <Button variant="default" disabled={removing || !rows.some(project => project.id && project.connected && projectRunnerId(project) === workspace.state.workspace_runner?.client_id)} onClick={() => {
+        const visible = rows.filter(project => project.id && project.connected && projectRunnerId(project) === workspace.state.workspace_runner?.client_id).map(project => project.id);
+        setSelected(current => visible.every(id => current.includes(id)) ? current.filter(id => !visible.includes(id)) : Array.from(new Set([...current, ...visible])));
+      }}>{p("selectVisibleProjects")}</Button>
+      <Button color="red" disabled={removing || !selected.some(id => workspace.projects.some(project => project.id === id))} onClick={() => setBatchConfirm(true)}>{p("removeSelectedProjects").replace("{count}", String(selected.length))}</Button>
+      {batchProgress && <span role="status">{batchProgress}</span>}
+    </div>}
+    <ProjectRows projects={rows} onUnregister={canManageProjects ? prepareRemoval : undefined} onSelect={canManageProjects ? (id, checked) => setSelected(current => checked ? Array.from(new Set([...current, id])) : current.filter(value => value !== id)) : undefined} selected={selected} busy={removing || Boolean(workspace.state.current_operation)} />
     {removeError && <p role="alert" className="workspace-notice">{p("unregisterError")}</p>}
+    {batchIssues.length > 0 && <ul aria-label={p("failedProjects")} className="workspace-notice">{batchIssues.map(issue => <li key={issue}>{issue}</li>)}</ul>}
+    {batchConfirm && <WorkspaceDialog title={p("removeSelectedProjects").replace("{count}", String(selected.length))} onClose={() => setBatchConfirm(false)} busy={removing}>
+      <p>{p("unregisterDescription")}</p>
+      <p>{selected.map(id => projectName(workspace.projects.find(project => project.id === id) || { id, connected: false })).join(", ")}</p>
+      <div className="shell-actions">
+        <Button variant="default" onClick={() => setBatchConfirm(false)}>{p("cancel")}</Button>
+        <Button color="red" onClick={() => void unregisterSelected()}>{p("removeSelectedProjects").replace("{count}", String(selected.length))}</Button>
+      </div>
+    </WorkspaceDialog>}
     {removal && <WorkspaceDialog title={p("unregisterProject")} onClose={() => setRemoval(null)} busy={removing}>
       <p>{p("unregisterDescription")}</p>
       <code>{displayProjectPath(removal.path)}</code>

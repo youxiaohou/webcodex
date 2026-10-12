@@ -91,3 +91,7 @@ export interface UnregisterObservation {
   expected_revision: string;
   path: string;
 }
+export interface BatchUnregisterResult {
+  state: import("./topology").DesktopState;
+  items: { project: string; success: boolean; status: string }[];
+}

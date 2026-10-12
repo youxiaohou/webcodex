@@ -16,7 +16,7 @@ import { Dashboard } from "../dashboard/Dashboard";
 import { connectionFixture, connectionSnapshot } from "../../test/connections-fixtures";
 
 const native = vi.hoisted(() => ({ invoke: vi.fn() }));
-const api = vi.hoisted(() => ({ managedInstructionsRead: vi.fn(async () => ({ path:"/fixture/desktop/instructions/AGENTS.md", exists:false, content:"", revision:"missing" })), prepareProjectUnregister: vi.fn(), unregisterProject: vi.fn(), runnerSettings: vi.fn(), updateRunnerSettings: vi.fn(), restartOwnedRunner: vi.fn(), sshResources: vi.fn(), addRunnerPlugin: vi.fn() }));
+const api = vi.hoisted(() => ({ managedInstructionsRead: vi.fn(async () => ({ path:"/fixture/desktop/instructions/AGENTS.md", exists:false, content:"", revision:"missing" })), prepareProjectUnregister: vi.fn(), prepareProjectsUnregister: vi.fn(), unregisterProject: vi.fn(), unregisterProjects: vi.fn(), runnerSettings: vi.fn(), updateRunnerSettings: vi.fn(), restartOwnedRunner: vi.fn(), sshResources: vi.fn(), addRunnerPlugin: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: native.invoke, isTauri: () => false }));
 vi.mock("../../lib/desktop-api", () => ({ desktopApi: api }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
@@ -389,6 +389,34 @@ describe("product workspace task flows", () => {
     await waitFor(() => expect(api.unregisterProject).toHaveBeenCalledExactlyOnceWith(observation));
     expect(onState).toHaveBeenCalledTimes(1);
     await waitFor(() => expect(screen.queryByRole("row", { name: "beta" })).not.toBeInTheDocument());
+  });
+
+  it("selects visible projects and stops a batch after the first unconfirmed removal", async () => {
+    const target = { config_path: "fixture.toml", client_id: "mini", server_url: "http://localhost" };
+    const observation = (project: string) => ({ target, project, path: project === alpha.id ? alpha.path : beta.path, expected_revision: "sha256:" + "a".repeat(64) });
+    api.prepareProjectUnregister.mockImplementation(async (project: string) => observation(project));
+    api.prepareProjectsUnregister.mockImplementation(async (projects: string[]) => projects.map(observation));
+    api.unregisterProjects.mockResolvedValue({ state, items: [
+      { project: alpha.id, success: true, status: "unregistered" },
+      { project: beta.id, success: false, status: "failed_or_unconfirmed" },
+    ] });
+    const onState = vi.fn();
+    render(wrap(<ProjectsPanel onState={onState} />));
+    await screen.findByLabelText("2 open sessions");
+    fireEvent.click(screen.getByRole("button", { name: "Select / deselect visible" }));
+    expect(screen.getByRole("checkbox", { name: "Select alpha" })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "Select beta" })).toBeChecked();
+    fireEvent.click(screen.getByRole("button", { name: "Remove selected (2)" }));
+    const dialog = await screen.findByRole("dialog", { name: "Remove selected (2)" });
+    expect(dialog).toHaveTextContent("Your folder and Git files stay on disk");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Remove selected (2)" }));
+    await waitFor(() => expect(api.unregisterProjects).toHaveBeenCalledExactlyOnceWith([observation(alpha.id), observation(beta.id)]));
+    expect(api.prepareProjectsUnregister).toHaveBeenCalledExactlyOnceWith([alpha.id, beta.id]);
+    expect(api.unregisterProject).not.toHaveBeenCalled();
+    expect(onState).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("row", { name: "alpha" })).not.toBeInTheDocument();
+    expect(screen.getByRole("row", { name: "beta" })).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("Unregister was not confirmed");
   });
 
   it.each([
