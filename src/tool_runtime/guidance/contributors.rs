@@ -46,6 +46,7 @@ pub(super) static DIRECT: GuidanceContributor = GuidanceContributor {
         "Never use scripts to bypass edit_project_files revision fences, rollback, or sensitive-path policy.",
         "Coalesce: read_files(items), search_project_texts(queries), search_file_context, project_validate with scope.packages, one edit_project_files batch. Keep result-dependent operations sequential. Avoid ritual turns.",
         "Simple observation: direct primitive. Batch predetermined independent observations; adaptive follow-ups stay sequential across model calls.",
+        "Related CLI checks: for a fixed, read-only Git/diagnostic checklist needing several native commands, prefer one bounded run_shell chain with explicit per-command exit checks; use run_process for a single literal executable. Keep effectful, ambiguous and result-dependent steps separate.",
         "Known target: bounded targeted reads. Broad discovery: small files/count search then targeted reads. Avoid ritual turns.",
     ],
 };
@@ -56,6 +57,7 @@ pub(super) static HOST_BATCHING: GuidanceContributor = GuidanceContributor {
         "Host-native Code Mode is model guidance only: no new authority/effects/retry/idempotency; does not require WebCodex nested Code Mode. Host support is not verified by WebCodex; emit compact evidence. Forward nonempty session_attention/operator_messages/peer_messages/job_attention in text(...) output; never drop.",
         "Same-kind: batch read_files(items), search_project_texts(queries), project_validate with scope.packages, or one edit_project_files batch; do not Promise.all same-kind micro-calls. Never per-Job waits, Promise.race, or automatic redispatch.",
         "Independent cross-tool read-only observations: native batches first; then Promise.allSettled for partial evidence or Promise.all for all-or-nothing. Prefer search_file_context for search→read; keep mechanically determined dependent chains in one Host cell. Never use observe_jobs heartbeat polling.",
+        "For several related read-only CLI observations, prefer one bounded run_shell chain with per-command exit checks when shell composition is useful; separate Host calls, even Promise.all, can carry significant overhead. Use run_process for one native command; never chain uncertain effects or result-dependent actions.",
     ],
 };
 
