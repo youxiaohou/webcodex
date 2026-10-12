@@ -374,6 +374,18 @@ class AgentLoopReportTests(unittest.TestCase):
         arguments.update(kwargs)
         return report.summarize(**arguments)  # type: ignore[arg-type]
 
+    def test_complete_summary_reads_persisted_native_batch_evidence(self) -> None:
+        self.insert_event("native-batch", schema_version=13)
+        with closing(sqlite3.connect(self.audit_db)) as connection, connection:
+            raw = connection.execute("SELECT summary_json FROM action_events WHERE event_id = ?", ("native-batch",)).fetchone()[0]
+            summary = json.loads(raw)
+            summary["model_ergonomics"]["native_batch"] = {"kind": "read_files", "requested_items": 2}
+            connection.execute("UPDATE action_events SET summary_json = ? WHERE event_id = ?", (json.dumps(summary), "native-batch"))
+        result = self.summarize(variant="tool_selection")
+        self.assertTrue(result["availability"]["native_batch"]["available"])
+        self.assertEqual(result["native_batch"]["read_files"]["requested_cardinality"]["total"], 2)
+        self.assertNotIn("native_batch_usage", result["availability"])
+
     def write_trace(self, trace_id: str, events: list[dict[str, object]]) -> Path:
         trace_root = self.root / "traces"
         trace_dir = trace_root / trace_id
@@ -1333,7 +1345,7 @@ class AgentLoopReportTests(unittest.TestCase):
         serialized_once = report._stable_json(manifest)
         serialized_twice = report._stable_json(json.loads(serialized_once))
         self.assertEqual(serialized_once, serialized_twice)
-        self.assertEqual(len(manifest["cases"]), 17)
+        self.assertEqual(len(manifest["cases"]), 22)
         typed_cases = [case for case in manifest["cases"] if "code_mode_surface" in case]
         self.assertEqual(len(typed_cases), 17)
         self.assertEqual(

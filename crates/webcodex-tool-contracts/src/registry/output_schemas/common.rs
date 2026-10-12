@@ -1014,7 +1014,7 @@ pub fn handoff_brief_schema(description: &str) -> Value {
     }));
     let validation_reason = nullable_with(json!({
         "type": "string",
-        "enum": ["validation_not_requested", "validation_unavailable"]
+        "enum": ["validation_not_requested", "validation_unavailable", "validation_inconclusive"]
     }));
     let nullable_bool = || nullable_with(json!({"type": "boolean"}));
     let nullable_count = || {

@@ -34,7 +34,7 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
             super::ToolSessionEvidencePolicy::NONE,
             ),
             "Create a new file or perform an intentional whole-file replacement. Existing-file replacement requires expected_read_revision from read_files; ToolRuntime resolves that model-facing snapshot handle to the Runner guard, so the model does not copy a digest. Failures expose minimal error facts and at most one parser-ready read_files recovery call when a fresh read is required. Choose this path when whole-file replacement is genuinely the clearest reliable mutation, then inspect the resulting diff and validate the final source.",
-        ),
+        ).with_discovery_keywords(&["create", "write", "overwrite", "file", "contents", "创建", "写入", "覆盖", "文件", "内容"]),
         PERMISSION_RISK_WRITE,
     ),
     adaptive_runtime_direct(
@@ -66,7 +66,7 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
                         .with_native_batch_field("changes"),
                 ),
                 "Project editor: read_files → edit_project_files → review_changes when Git review is useful → task-appropriate validation. One change per file. For existing-file edits/deletes/renames, set expected_read_revision from read_files.read_revision; create requires content. Exact edits fail closed on ambiguity; replace_range edits 1-based inclusive lines from that snapshot. Batches preflight transactionally; Runner rechecks source before mutation. dry_run plans only. Stale state returns read_files recovery; outcome_unknown requires workspace observation before another write.",
-            ),
+            ).with_discovery_keywords(&["replace", "exact", "snippets", "edit", "existing", "files", "text", "insert", "delete", "rename", "move", "替换", "编辑", "修改", "文字", "文本", "插入", "删除", "重命名", "移动", "文件"]),
             PERMISSION_RISK_WRITE,
         ),
         60,

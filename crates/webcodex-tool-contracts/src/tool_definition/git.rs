@@ -49,7 +49,7 @@ pub(super) const SUMMARY_DEFINITIONS: &[ToolDefinition] = &[
         .with_composition_policy(super::ToolCompositionPolicy::Parallel)
         .with_host_orchestration_hint(super::ToolHostOrchestrationHint::independent_parallel_read()),
         "Summarize an exact committed Git range as bounded file/class/symbol metadata and change statistics, without returning patch bodies. Commits and the merge-base are pinned; incomplete coverage stays explicit. Ordinary review uses review_changes. Read-only.",
-    ))),
+    ).with_discovery_keywords(&["committed", "statistics", "summary", "commit", "range", "提交", "统计", "汇总", "范围"]))),
     adaptive_runtime_direct(
         change_summary_like(git_like(model_spec(
             def(
@@ -86,7 +86,7 @@ pub(super) const SUMMARY_DEFINITIONS: &[ToolDefinition] = &[
             )
             .with_composition_policy(super::ToolCompositionPolicy::Parallel),
             "Review a fenced Git snapshot with three-line context. Workspace is the net HEAD-to-worktree patch, including staged/untracked contents, not an index-only plan. Committed scope pins commits/merge-base. Follow only next_call with unchanged inputs; workspace changes fail closed. Use get_git_status for cleanliness.",
-        ))),
+        ).with_discovery_keywords(&["inspect", "review", "git", "changes", "code", "diff", "审查", "查看", "代码", "变动", "修改", "差异"]))),
         120,
         super::ToolDirectReason::CoreWorkflow,
     ),
@@ -127,7 +127,7 @@ pub(super) const SUMMARY_DEFINITIONS: &[ToolDefinition] = &[
                 )
                 .with_composition_policy(super::ToolCompositionPolicy::Parallel),
                 "Read a structured workspace summary: Git branch, HEAD, staged/unstaged/untracked files and diff statistics, without a patch by default. Optional include_diff adds bounded unstaged hunks and safe untracked previews, not a complete staged patch. Ordinary code review uses review_changes; recent Session event history is opt-in. Read-only.",
-            ),
+            ).with_discovery_keywords(&["workspace", "summary", "changes", "modified", "files", "工作区", "汇总", "变动", "修改", "文件"]),
         )),
 ];
 pub(super) const DETAIL_DEFINITIONS: &[ToolDefinition] = &[
@@ -181,7 +181,7 @@ pub(super) const DETAIL_DEFINITIONS: &[ToolDefinition] = &[
             super::ToolHostOrchestrationHint::independent_parallel_read(),
         ),
         "Read current Git dirty/staged/untracked status for one exact Project without generating a review diff; use review_changes for patch content.",
-    )),
+    ).with_discovery_keywords(&["check", "clean", "dirty", "working", "tree", "staged", "unstaged", "untracked", "status", "changes", "工作区", "干净", "状态", "暂存", "未暂存", "变动", "修改"])),
     change_summary_like(git_like(
         model_spec(
             def(
@@ -226,7 +226,7 @@ pub(super) const DETAIL_DEFINITIONS: &[ToolDefinition] = &[
                 super::ToolHostOrchestrationHint::independent_parallel_read(),
             ),
             "Read bounded Git diff hunks for selected paths: cached=true selects staged changes, omission selects unstaged changes; exact base_commit+head_commit selects a committed range. Preserves source fences, bounded page/hunk continuation and safe recovery. Use review_changes for a complete net-workspace review. Read-only.",
-        ),
+        ).with_discovery_keywords(&["staged", "unstaged", "diff", "patch", "hunks", "lines", "暂存", "未暂存", "差异", "补丁", "变动", "差异行"]),
     )),
     git_like(model_spec(
         def(

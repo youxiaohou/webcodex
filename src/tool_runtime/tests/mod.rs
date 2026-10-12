@@ -61,6 +61,7 @@ mod read_files;
 mod reconnect;
 mod resource_references;
 mod runner_fixtures;
+mod safe_recovery;
 mod schema;
 mod script;
 mod search_and_read;

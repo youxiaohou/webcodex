@@ -465,6 +465,9 @@ impl ToolRuntime {
             }
             control.main_dispatched = true;
         }
+        if let Some(telemetry) = telemetry.as_mut() {
+            telemetry.capture_admitted_call(&call);
+        }
         // Preserve the concrete business Session for final presentation and
         // bounded ActionAudit evidence. The generic recorder remains independent
         // provenance and Window affinity never becomes execution or Session authority.

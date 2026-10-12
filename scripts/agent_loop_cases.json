@@ -447,6 +447,135 @@
         "required": true,
         "expectation": "Independent fixture-side filesystem absence check and structured receipt/outcome inspection; baseline is unsupported, not a pass or comparable upgrade sample."
       }
+    },
+    {
+      "id": "selection_single_read",
+      "title": "Choose tools for one exact observation",
+      "prompt": "What is the current BENCH_TARGET_ALPHA value in tests/fixtures/agent-loop-multi-file/alpha.txt? Report the value and its source. Do not modify files.",
+      "correctness": {
+        "workspace_must_remain_clean": true,
+        "required_observations": [
+          "BENCH_TARGET_ALPHA=before"
+        ],
+        "fixture_oracle": {
+          "files": {
+            "tests/fixtures/agent-loop-multi-file/alpha.txt": {
+              "expected_text": "BENCH_TARGET_ALPHA=before\nALPHA_UNRELATED_SENTINEL=keep\n"
+            }
+          }
+        }
+      },
+      "validation": {
+        "required": false,
+        "expectation": "Independent source-value verification and unchanged workspace."
+      },
+      "target": "webcodex_repository",
+      "experiment": "tool_selection"
+    },
+    {
+      "id": "selection_batch_read",
+      "title": "Choose tools for related observations",
+      "prompt": "Report the BENCH_TARGET_ALPHA and BENCH_TARGET_BETA values from tests/fixtures/agent-loop-multi-file/alpha.txt and tests/fixtures/agent-loop-multi-file/beta.txt, and confirm whether both unrelated sentinel values equal keep. Cite both files. Do not modify files.",
+      "correctness": {
+        "workspace_must_remain_clean": true,
+        "required_observations": [
+          "BENCH_TARGET_ALPHA=before",
+          "BENCH_TARGET_BETA=before",
+          "both sentinels equal keep"
+        ],
+        "fixture_oracle": {
+          "files": {
+            "tests/fixtures/agent-loop-multi-file/alpha.txt": {
+              "expected_text": "BENCH_TARGET_ALPHA=before\nALPHA_UNRELATED_SENTINEL=keep\n"
+            },
+            "tests/fixtures/agent-loop-multi-file/beta.txt": {
+              "expected_text": "BENCH_TARGET_BETA=before\nBETA_UNRELATED_SENTINEL=keep\n"
+            }
+          }
+        }
+      },
+      "validation": {
+        "required": false,
+        "expectation": "Independent answer check against both fixture files; unchanged workspace."
+      },
+      "target": "webcodex_repository",
+      "experiment": "tool_selection"
+    },
+    {
+      "id": "selection_cross_tool_review",
+      "title": "Choose tools for a bounded repository investigation",
+      "prompt": "Determine whether this checkout is clean, locate the implementation that filters tool discovery queries, and explain from its source whether every query word must match. Include the branch and source location. Do not modify files.",
+      "correctness": {
+        "workspace_must_remain_clean": true,
+        "required_observations": [
+          "current branch and worktree cleanliness",
+          "actual discovery query implementation",
+          "all-word matching conclusion supported by source"
+        ]
+      },
+      "validation": {
+        "required": false,
+        "expectation": "Reviewer verifies answer against the exact tested revision and independent Git status; no prescribed tool sequence."
+      },
+      "target": "webcodex_repository",
+      "experiment": "tool_selection"
+    },
+    {
+      "id": "selection_failed_test_recovery",
+      "title": "Choose tools to diagnose and repair a failing test",
+      "prompt": "The isolated Rust project under tests/fixtures/agent-selection has a failing greeting test. Observe its failure before changing files, fix the implementation while preserving the test and unrelated function, then verify tests pass. Report the failure, fix and final validation. Change only that fixture implementation.",
+      "correctness": {
+        "fixture_oracle": {
+          "changed_files": [
+            "tests/fixtures/agent-selection/src/lib.rs"
+          ],
+          "files": {
+            "tests/fixtures/agent-selection/src/lib.rs": {
+              "expected_text": "pub fn greeting() -> &'static str {\n    \"hello recovered\"\n}\n\npub fn topic() -> &'static str {\n    \"keep\"\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn greeting_matches_target() {\n        assert_eq!(super::greeting(), \"hello recovered\");\n        assert_eq!(super::topic(), \"keep\");\n    }\n}\n"
+            }
+          }
+        },
+        "required_observations": [
+          "test fails before implementation edit",
+          "same unchanged test passes after implementation edit"
+        ]
+      },
+      "validation": {
+        "required": true,
+        "expectation": "Independent fixture-side cargo test before and after; retain failing and passing execution evidence; no test weakening."
+      },
+      "target": "webcodex_repository",
+      "experiment": "tool_selection"
+    },
+    {
+      "id": "selection_session_recovery",
+      "title": "Recover a selected task in a new conversation",
+      "prompt": "In this first conversation, inspect tests/fixtures/agent-loop-multi-file/alpha.txt without editing it and save a decision to preserve ALPHA_UNRELATED_SENTINEL=keep plus a progress note that BENCH_TARGET_ALPHA must next become after. Report the exact saved task identity and stop. In a fresh conversation, recover that explicitly selected saved task, verify current files, perform the remaining change and report its validation. Do not create a replacement task or infer its identity by title or recency.",
+      "correctness": {
+        "fixture_oracle": {
+          "changed_files": [
+            "tests/fixtures/agent-loop-multi-file/alpha.txt"
+          ],
+          "files": {
+            "tests/fixtures/agent-loop-multi-file/alpha.txt": {
+              "expected_text": "BENCH_TARGET_ALPHA=after\nALPHA_UNRELATED_SENTINEL=keep\n"
+            }
+          }
+        },
+        "required_observations": [
+          "two actual fresh ChatGPT Web conversations",
+          "same explicitly selected Workflow Session",
+          "saved decision and progress available after recovery",
+          "external file state verified before edit",
+          "no replacement task or execution"
+        ]
+      },
+      "validation": {
+        "required": true,
+        "expectation": "Driver must coordinate two real conversations, verify explicit Session identity and retained notes from runtime evidence, and independently verify final bytes. Single-conversation or scripted-only runs cannot establish this scenario."
+      },
+      "target": "webcodex_repository",
+      "experiment": "tool_selection"
     }
   ]
 }

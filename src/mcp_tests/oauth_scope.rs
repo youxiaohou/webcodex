@@ -1231,3 +1231,58 @@ async fn oauth_admin_grant_discovers_and_calls_operator_trace_on_all_surfaces() 
         assert_eq!(body["result"]["isError"], false, "{body:?}");
     }
 }
+
+#[tokio::test]
+async fn oauth_natural_language_discovery_cannot_expand_execution_authority() {
+    let (_tmp, service, token) = oauth_mcp_service("runtime:read project:read");
+    for (query, expected, forbidden) in [
+        ("读取源码文件内容", Some("read_files"), "edit_project_files"),
+        ("替换文字并运行程序", None, "run_process"),
+        ("后台服务状态", None, "run_detached_process"),
+        ("read_memory", None, "read_memory"),
+    ] {
+        let (status, body, challenge) = oauth_mcp_request(
+            &service,
+            &token,
+            "tools/call",
+            mcp_2026_params(
+                json!({"name":"read_tool_manifest","arguments":{"query":query,"limit":5}}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body:?}");
+        assert_eq!(body["result"]["isError"], false, "{body:?}");
+        assert!(challenge.is_none());
+        let output = &body["result"]["structuredContent"]["output"];
+        let tools = output["tools"].as_array().unwrap();
+        assert!(tools.len() <= 5);
+        assert!(
+            !tools.iter().any(|tool| tool["name"] == forbidden),
+            "{body:?}"
+        );
+        if let Some(expected) = expected {
+            assert!(
+                tools.iter().any(|tool| tool["name"] == expected),
+                "{body:?}"
+            );
+        }
+        assert!(!body.to_string().contains("discoveryKeywords"));
+        assert!(output["contract"].is_null());
+    }
+    let (status, body, challenge) = oauth_mcp_request(
+        &service,
+        &token,
+        "tools/call",
+        mcp_2026_params(adaptive_gateway_params(
+            "run_process",
+            json!({"project":"missing","executable":"missing"}),
+        )),
+    )
+    .await;
+    assert_mcp_oauth_scope_rejected(
+        status,
+        &body,
+        challenge.as_deref(),
+        Some(crate::auth::SCOPE_JOB_RUN),
+    );
+}

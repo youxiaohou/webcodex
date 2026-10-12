@@ -679,7 +679,7 @@ async fn e2a_failed_cargo_test_is_known_result_not_outcome_unknown() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn e2a_promise_all_validators_handoff_sequentially_then_jobs_remain_independent() {
+async fn e2a_promise_all_validators_preserve_mixed_outcomes_through_exact_job_continuations() {
     let client_id = "code-mode-e2a-two-validations";
     let (runtime, project, session_id) = e2a_validation_runtime(client_id).await;
     let task = spawn_code_mode_call(
@@ -808,45 +808,71 @@ async fn e2a_promise_all_validators_handoff_sequentially_then_jobs_remain_indepe
     assert_eq!(baseline.output["items"][1]["output"]["status"], "running");
 
     for (request, job) in [(&first_request, &first_job), (&second_request, &second_job)] {
+        let request_json = serde_json::to_value(request).unwrap();
+        let failed = request_json["job_context"]["validation"]["tool"] == "cargo_test";
         runtime
             .runner_registry
             .update_job(super::validation_handoff::cargo_test_update(
                 client_id,
                 &request.request_id,
                 job,
-                "completed",
-                "validation completed\n",
+                if failed { "failed" } else { "completed" },
+                if failed {
+                    "running 1 test\ntest example::regression ... FAILED\nfailures:\n    example::regression\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out\n"
+                } else {
+                    "validation completed\n"
+                },
                 "",
-                Some(0),
+                Some(if failed { 101 } else { 0 }),
                 super::validation_handoff::completed_progress(),
                 true,
             ))
             .await
             .unwrap();
     }
-    let terminal = runtime
-        .observe_jobs_for_auth(
-            vec![
-                ObserveJobsItem {
-                    job_id: first_job.clone(),
-                    after_observation_token: None,
-                    observation_ref: None,
-                },
-                ObserveJobsItem {
-                    job_id: second_job.clone(),
-                    after_observation_token: None,
-                    observation_ref: None,
-                },
-            ],
-            20,
-            None,
-            ObserveJobsWakeOn::AllTerminal,
-            Some(&bootstrap_auth_context()),
+    // Each projected child continuation observes its original Job unchanged.
+    // A failed validator must not hide the other result or restart either one.
+    for child in receipt["children"].as_array().unwrap() {
+        let continuation = &child["continuation"];
+        assert_eq!(continuation["tool"], "observe_jobs");
+        crate::tool_runtime::startup_brief::validate_schema_instance_for_test(
+            &continuation["arguments"],
+            &webcodex_tool_contracts::input_schema_for_tool("observe_jobs"),
         )
-        .await;
-    assert!(terminal.success, "{:?}", terminal.error);
-    assert_eq!(terminal.output["items"][0]["output"]["status"], "completed");
-    assert_eq!(terminal.output["items"][1]["output"]["status"], "completed");
+        .expect("exact child continuation must validate unchanged");
+        let terminal = super::safe_recovery::canonical_call(
+            &runtime,
+            continuation["tool"].as_str().unwrap(),
+            continuation["arguments"].clone(),
+        )
+        .await
+        .unwrap();
+        assert!(terminal.success, "{terminal:?}");
+        let observed = &terminal.output["items"][0];
+        assert_eq!(observed["job_id"], child["job_id"]);
+        assert_eq!(observed["terminal"], true);
+        assert_eq!(
+            observed["status"],
+            if child["tool"] == "cargo_test" {
+                "failed"
+            } else {
+                "completed"
+            }
+        );
+        assert_eq!(observed["validation"]["state"], "completed");
+        assert_eq!(
+            observed["validation"]["passed"],
+            child["tool"] != "cargo_test"
+        );
+        if child["tool"] == "cargo_test" {
+            assert!(
+                observed["validation"]["diagnostics"]
+                    .to_string()
+                    .contains("example::regression"),
+                "{terminal:?}"
+            );
+        }
+    }
     assert!(probe_patch_agent_request(&runtime, client_id)
         .await
         .is_none());

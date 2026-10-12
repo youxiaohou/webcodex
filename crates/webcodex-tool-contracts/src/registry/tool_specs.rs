@@ -20,6 +20,7 @@ use std::collections::BTreeSet;
 pub struct ToolDescriptor {
     pub name: String,
     pub description: String,
+    pub discovery_keywords: &'static [&'static str],
 }
 
 impl ToolDescriptor {
@@ -49,6 +50,7 @@ impl ToolDescriptor {
             annotations: self.annotations(),
             name: self.name,
             description: self.description,
+            discovery_keywords: self.discovery_keywords,
         }
     }
 }
@@ -339,6 +341,9 @@ fn tool_descriptor(name: &'static str, description: impl Into<String>) -> ToolDe
     ToolDescriptor {
         name: name.to_owned(),
         description: description.into(),
+        discovery_keywords: lookup_tool_definition(name)
+            .and_then(|definition| definition.model_spec)
+            .map_or(&[], |spec| spec.discovery_keywords),
     }
 }
 
@@ -379,6 +384,29 @@ mod tests {
         for (descriptor, spec) in descriptors.iter().zip(&specs) {
             assert_eq!(descriptor.name, spec.name);
             assert_eq!(descriptor.description, spec.description);
+            assert_eq!(descriptor.discovery_keywords, spec.discovery_keywords);
+            assert_eq!(
+                descriptor.discovery_keywords,
+                lookup_tool_definition(&spec.name)
+                    .unwrap()
+                    .model_spec
+                    .map_or(&[][..], |model| model.discovery_keywords)
+            );
+            let public = serde_json::to_value(spec).unwrap();
+            assert!(public.get("discoveryKeywords").is_none());
+            assert!(public.get("discovery_keywords").is_none());
+            let mut seen_keywords = BTreeSet::new();
+            assert!(spec.discovery_keywords.len() <= 32);
+            for keyword in spec.discovery_keywords {
+                assert!(!keyword.is_empty() && keyword.chars().count() <= 64);
+                assert_eq!(*keyword, keyword.to_lowercase());
+                assert!(keyword.is_ascii() || keyword.chars().count() >= 2);
+                assert!(
+                    seen_keywords.insert(keyword),
+                    "duplicate keyword on {}",
+                    spec.name
+                );
+            }
             assert_eq!(descriptor.annotations(), spec.annotations);
             assert_eq!(spec.input_schema, input_schema_for_tool(&spec.name));
             assert_eq!(spec.output_schema, output_schema_for_tool(&spec.name));

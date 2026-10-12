@@ -67,6 +67,16 @@ For live Agent comparisons record the connection path (Apps, direct MCP or nativ
 Host mode and model configuration separately; a Server manifest cannot prove which
 schemas a Host loaded. See [MCP client contracts](../implementation/mcp-client-contract-alignment.md).
 
+Session-filtered counts cover only calls linked to that exact Session. Discovery
+or rejected bootstrap calls made before a Session is selected can be unlinked.
+An explicit business `session_id` also does not select the outer recorder: a
+successful tool can write business Session events without a canonical ActionAudit
+recording link. For recorder coverage, the Host must supply the authorized
+`_wc.record` on relevant MCP invocations; see the [Session model](../agent/session-model.md).
+Unlinked calls are not retroactively attributed by time, Project or apparent
+intent. Keep their Host observations separately when available. A Session-scoped
+call count does not establish the complete conversation's call count or model turns.
+
 Trace persistence is fail-open observability, so `runner.requests_observed` means
 exactly that: enqueue records observed in the supplied trace tree. The report does
 not claim that the trace tree is a complete Runner-request ledger.
@@ -227,8 +237,10 @@ expectation.
 The profiler includes a deterministic case fingerprint so changed case definitions
 cannot silently compare as the same pair.
 
-The corpus contains seventeen cases: eleven coding/inspection cases and six general
-file/command cases. The coding/inspection cases are:
+The controlled-lane corpus contains seventeen cases: eleven coding/inspection cases
+and six general file/command cases. Five additional `tool_selection` cases use
+task-language prompts without prescribing an execution lane. The controlled
+coding/inspection cases are:
 
 - `readonly_review`: read-only status/read/search/diff inspection.
 - `focused_edit_validation`: one focused edit, diff review, and successful
@@ -392,6 +404,149 @@ real Host/model capture. Exact model round trips remain unavailable unless the H
 records turn identity; meaningful outer calls remain only the documented proxy.
 Report cold/warm context, pair order, sample count, and dispersion rather than
 treating one run or one ordering as causal proof.
+
+## Free tool-selection experiment
+
+The five `selection_*` cases in the same manifest measure task outcomes while
+allowing any admitted mix of Direct tools, native batches, Host Code Mode, and
+experimental WebCodex Code Mode. Native batching is an invocation shape, not a
+fourth execution surface. These cases use `experiment=tool_selection` and the
+report variant/surface `tool_selection`. They cannot be relabeled as controlled
+Direct/Code Mode cases. The original forced-lane runtime evidence gates remain
+unchanged.
+
+- `selection_single_read`: obtain one exact fixture value and preserve files.
+- `selection_batch_read`: reconcile two fixture values and preserved sentinels.
+- `selection_cross_tool_review`: inspect Git state and locate the current query
+  matching implementation, without prescribing tools or a preferred conclusion.
+- `selection_failed_test_recovery`: observe the deliberately failing isolated
+  Rust fixture, repair its implementation, retain its test, and verify success.
+- `selection_session_recovery`: save a decision/progress note, then explicitly
+  recover the same Session in a second real ChatGPT Web conversation.
+
+The intentionally failing Rust fixture has its own workspace and is not a
+production workspace test. The driver must verify the initial failed test and
+final passing test independently. A matching final file alone does not prove
+that a model observed the failure, selected useful tools, or recovered a Session.
+Unlike old exact-edit fixtures, a successful file oracle never supplies the free
+selection task verdict: the driver must provide independent answer/workflow
+correctness. Missing correctness leaves a sample partial.
+
+After the manifest is recorded at the tested checkout's exact HEAD, run:
+
+```sh
+python3 scripts/agent_loop_benchmark.py \
+  --experiment tool_selection --repo . --base-revision <40-hex-fixture-base> \
+  --driver '<real-host-driver-command>' --samples 3 \
+  --case-id selection_single_read --case-id selection_batch_read \
+  --case-id selection_cross_tool_review --output /tmp/tool-selection.json
+```
+
+The caller-owned driver receives the existing receipt/workspace/prompt variables
+plus `WEBCODEX_BENCH_EXPERIMENT=tool_selection`. It must leave tool choice free,
+collect ordinary ActionAudit evidence, and produce the existing bounded receipt
+and independent correctness verdict. Selection reports can be compared with
+other selection reports for the exact same case fingerprint and fixture Git base;
+controlled-lane reports cannot be mixed into that comparison. Repetitions retain
+failed, partial and unsupported observations without declaring a winner.
+
+There is no bundled authenticated ChatGPT Web driver. Scripted MCP or loopback
+tests are useful runtime validation and must not be reported as real model-choice
+or Web acceptance. For actual Web captures use an isolated candidate Server and
+Runner and a disposable registered Project; record model/mode, connection path,
+Server/Runner build identities and source changes separately. The report cannot
+prove which schemas the Host loaded or restore unsaved Host messages. A driver
+without two real conversation contexts must mark the recovery case unsupported.
+
+### Offline discovery relevance
+
+`scripts/agent_tool_discovery_cases.json` contains 48 labeled English/Chinese
+requests, including exact names, paraphrases, ambiguity, no-match and OAuth-scope
+negatives. Every fourth case is the predetermined heldout set. Labels are scorer
+inputs, never hints to the evaluated model or keywords to copy into production.
+Scope fixtures describe OAuth authority and must be applied by the capture driver,
+not passed as manifest arguments. Discovery is not execution authorization.
+
+The capture JSON has `schema_version=1`, the exact corpus SHA-256
+`corpus_fingerprint`, a 40-hex `base_revision`, and `results` containing
+`{case_id, returned_tools}` rows in actual retrieval order. Capture real canonical
+manifest responses; an exact-contract response contributes its returned tool name.
+No-match captures use an empty array. Do not fill omitted cases with empty arrays.
+
+```sh
+python3 scripts/agent_loop_report.py discovery \
+  --results /private/path/discovery-capture.json --output /tmp/discovery-report.json
+```
+
+The scorer validates identity, bounds and labels, computes top-five relevance and
+forbidden leakage, and keeps missing split metrics unavailable. Low baseline
+relevance is an observation, not a harness failure or proof of a fixed bug.
+
+### Native batch request evidence
+
+New optional ModelErgonomics v13 `native_batch` records capture admitted outer
+`read_files` requested items or `search_project_texts` requested queries, each
+bounded to 1..8. They contain no paths, query text, results, or credentials.
+The profiler's `native_batch` section distinguishes observed multi-item calls
+from complete totals. Missing/legacy/malformed records stay unavailable, as does
+coverage when an outer call lacks canonical identity. These counts prove requested
+cardinality, not completed work; nested Code Mode children remain unmeasured.
+
+## Manual ChatGPT Web selection baseline — 2026-10-12
+
+The user operated the ChatGPT Web App against an isolated Server/Runner and a
+disposable Project. These are manual acceptance observations, not results from
+the automated benchmark driver. Each reported answer was checked against current
+fixture bytes, Git state, and persisted Session/ActionAudit evidence. The user
+confirmed that the continuity case used two distinct new Web conversations.
+
+The source base was `8153ef8caace55ab5c385e9f70f371d1c0c421c0` with the
+uncommitted PR1 telemetry changes, built with `experimental-code-mode`. The
+fixture snapshot was `cac416c3b2c33cd36597a7192cb216e4b2d398d3`.
+The running binaries were recorded separately by SHA-256:
+
+```text
+webcodex-server d90da9a6cbba59e5bd8b1afab834e3697f5efc60b42290e6b864dc5ac23b90fc
+webcodex-runner 7ed037ed0259e90704812e243e54ccef200b7ce96d669bafffcdc8a8114e9993
+```
+
+Later offline scorer/reporting and documentation changes did not change those
+Rust binaries. Connection credentials, exact Session identifiers, private chat
+links and original local evidence remain outside the repository. The model/effort
+was tentatively reported by the user as “6-sol, 极高”; its exact identity was not
+independently verified. One continuity conversation URL was supplied, with no
+stage mapping; other conversation URLs are unavailable.
+
+| Case | Independently verified outcome | Selected evidence and limits |
+| --- | --- | --- |
+| `selection_single_read` | Correct `before` value; unchanged files | One successful outer `read_files`, requested cardinality 1 |
+| `selection_batch_read` | Both values `before`, both sentinels `keep`; unchanged files | One successful outer `read_files`, requested cardinality 2 |
+| `selection_cross_tool_review` | Correct clean Git state, branch and source-supported AND matching conclusion | One successful outer `search_project_texts`, requested cardinality 4 |
+| `selection_failed_test_recovery` | Test exit 101 before edit, same test target exit 0 after; unchanged test and unrelated function; independent local rerun passed | Session events and final bytes corroborate recovery; Session-linked audit coverage is partial |
+| `selection_session_recovery` | Explicit resume reused the original Session and saved decision/progress; exact final `after`/`keep` bytes | Fresh file read preceded guarded edit; only alpha changed from the pre-case byte snapshot; prior greeting repair remained intact |
+
+The failed-test repair was preserved for the continuity case. A pre-case tracked
+file hash snapshot independently established that continuity changed only alpha;
+the inherited repair was not counted as a new continuity edit. This manual run
+therefore does not claim the automated fresh-worktree fixture oracle was used.
+
+An earlier batch-read answer named a different Project and had no matching
+isolated-runtime Session. It remains an unavailable connection attempt; only the
+subsequent correctly bound run is accepted. During recovery, some successful
+business calls omitted the outer recorder. Their Session events verify business
+outcomes, but they do not establish complete Session-selected outer-call totals.
+These baseline limitations remain visible; this PR does not fix tool choice or
+change recorder authority. Exact model turns, whole-task timing and repair-turn
+counts are unavailable. No latency, token, speedup or framework comparison is
+claimed from these five samples.
+
+Separately, actual canonical manifest retrievals on the unchanged discovery
+implementation were scored for the 36 development cases: 9/25 positive Top-5
+hits (36%), recall@5 32.67%, and 11/11 negative rejections with no forbidden
+returns. These are local deterministic retrieval measurements, not Web model
+performance. The 12 fixed heldout cases were not captured for this baseline;
+their baseline metrics remain unavailable. The corpus fingerprint is
+`e03448281d1ab1fcb6c5447836eda07216257838175ed9542d7507a72c126d10`.
 
 ## Typed Surface v1 observed dogfood — 2026-09-18
 

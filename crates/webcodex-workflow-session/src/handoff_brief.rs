@@ -222,30 +222,43 @@ pub fn build_handoff_brief(input: HandoffBriefInput<'_>) -> Value {
         basis_reasons.insert("discussion_unavailable");
     }
 
-    let progress_state = progress_state(
-        input.session_summary,
-        continuation_available,
-        &workspace,
-        &validation,
-        &jobs,
-        open_risks,
-        input.guidance_available,
-    );
+    let snapshot_changed = input.session_changed_during_snapshot
+        || input.external_observations_changed_during_snapshot;
+    let progress_state = if snapshot_changed && input.session_summary.lifecycle.allows_mutation() {
+        "insufficient_evidence"
+    } else {
+        progress_state(
+            input.session_summary,
+            continuation_available,
+            &workspace,
+            &validation,
+            &jobs,
+            open_risks,
+            input.guidance_available,
+        )
+    };
     let changed_count = changes["returned"].as_u64().unwrap_or(0);
     let recent_count = recent_files["returned"].as_u64().unwrap_or(0);
-    let next_actions = next_actions(
-        &workspace,
-        &validation,
-        &jobs,
-        open_guidance,
-        open_risks,
-        open_questions,
-        open_todos,
-        changed_count,
-        recent_count,
-        continuation,
-        input.existing_suggested_actions,
-    );
+    let next_actions = if snapshot_changed {
+        // The other sections remain observations of the captured snapshots,
+        // not a current task verdict. Do not suggest acting on their stale
+        // instruction, validation or Job context before explicit recovery.
+        vec!["re-read read_session_handoff for the exact Session before dependent work".to_string()]
+    } else {
+        next_actions(
+            &workspace,
+            &validation,
+            &jobs,
+            open_guidance,
+            open_risks,
+            open_questions,
+            open_todos,
+            changed_count,
+            recent_count,
+            continuation,
+            input.existing_suggested_actions,
+        )
+    };
 
     let reason_codes = basis_reasons.into_iter().collect::<Vec<_>>();
     let mut brief = json!({
@@ -295,7 +308,7 @@ pub fn build_handoff_brief(input: HandoffBriefInput<'_>) -> Value {
         "deterministic": true,
         "llm_summary": false,
     });
-    enforce_hard_limit(&mut brief);
+    enforce_hard_limit(&mut brief, snapshot_changed);
     brief
 }
 
@@ -853,7 +866,7 @@ fn push_unique(actions: &mut Vec<String>, action: &str) {
     }
 }
 
-fn enforce_hard_limit(brief: &mut Value) {
+fn enforce_hard_limit(brief: &mut Value, preserve_recovery_action: bool) {
     // External claims are lower priority than native task/validation context.
     // Retain the newest report when the byte budget can hold only one.
     while handoff_brief_size(brief) >= HANDOFF_BRIEF_HARD_MAX_BYTES
@@ -870,7 +883,10 @@ fn enforce_hard_limit(brief: &mut Value) {
             && pop_list_item(brief, pointer)
         {}
     }
-    while handoff_brief_size(brief) >= HANDOFF_BRIEF_HARD_MAX_BYTES
+    // A raced snapshot's single recovery action must survive even when escaped
+    // instruction excerpts consume the budget. Trim those excerpts instead.
+    while !preserve_recovery_action
+        && handoff_brief_size(brief) >= HANDOFF_BRIEF_HARD_MAX_BYTES
         && pop_plain_array_item(brief, "/next_actions")
     {}
     let instruction_phase_size = handoff_brief_size(brief);

@@ -913,3 +913,48 @@ async fn pruned_tools_keep_exact_manifest_and_canonical_gateway_validation() {
         }
     }
 }
+
+#[tokio::test]
+async fn natural_language_manifest_is_identical_through_direct_and_gateway_routes() {
+    let runtime = test_runtime();
+    let auth = adaptive_direct_auth();
+    for (query, expected) in [
+        ("Find documentation for this symbol", "read_symbol_hover"),
+        ("读取暂存补丁的差异行", "read_git_diff_hunks"),
+        ("Start an executable with literal arguments", "run_process"),
+    ] {
+        let arguments = json!({"query":query,"limit":5});
+        let mut baseline = None;
+        for params in [
+            json!({"name":"read_tool_manifest","arguments":arguments}),
+            adaptive_runtime_gateway_params("read_tool_manifest", arguments.clone()),
+        ] {
+            let McpOutcome::Ok(result) = handle_mcp_request(
+                &runtime,
+                rpc("tools/call", Some(json!(1)), mcp_2026_params(params)),
+                Some(&auth),
+            )
+            .await
+            else {
+                panic!("manifest {query}")
+            };
+            assert_eq!(result["result"]["isError"], false, "{result:?}");
+            let output = &result["result"]["structuredContent"]["output"];
+            let names = output["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|tool| tool["name"].as_str().unwrap())
+                .collect::<Vec<_>>();
+            assert!(names.contains(&expected), "{query}: {result:?}");
+            assert!(names.len() <= 5);
+            assert!(output["contract"].is_null());
+            assert!(!result.to_string().contains("discoveryKeywords"));
+            if let Some(baseline) = &baseline {
+                assert_eq!(output, baseline);
+            } else {
+                baseline = Some(output.clone());
+            }
+        }
+    }
+}

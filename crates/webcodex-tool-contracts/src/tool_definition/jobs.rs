@@ -30,7 +30,7 @@ pub(super) const EXECUTION_DEFINITIONS: &[ToolDefinition] = &[
                         Some(crate::metadata::PROJECT_WRITE), true, NoPath, true, true,
                         super::ToolSessionEvidencePolicy::NONE),
                     "Intentionally format 1..8 ordered Project-relative source files under one Runner-resolved recipe root. Requires project:write, job:run and project_format_v1. Rust uses bounded Cargo edition and installed rustfmt stdin/stdout with skip_children; custom configuration and unsupported topology fail closed. Python uses bounded pyproject target-version and isolated Ruff stdin/stdout; extend configuration and unsupported topology fail closed. No workspace traversal, installs, package scripts, arbitrary flags or implied network permission. Candidate bytes stay private; Runner compares source and file identity before each guarded write. A multi-file write is not atomic: failure, cancellation, timeout, conflicting edits or a lost receipt can leave mutation unknown. Known state_changed comes only from the verified executor report, never exit status. One admitted Job owns every phase; retain and observe its exact continuation when pending or uncertain. Never automatically retry or redispatch. Review source before any new mutation. Formatting does not supply the edit_project_files receipt required by Code Mode dependent validation.",
-                ).with_execution(super::ToolExecutionContract::new(super::ToolExecutionForm::ProjectFormat,
+                ).with_discovery_keywords(&["format", "source", "code", "formatting", "格式化", "源码", "代码"]).with_execution(super::ToolExecutionContract::new(super::ToolExecutionForm::ProjectFormat,
                     super::ToolExecutionLifetime::Runner, super::ToolExecutionStart::SyncFirst,
                     super::ToolExecutionContinuation::ObserveJobs)),
                 93, super::ToolDirectReason::CoreWorkflow),
@@ -72,7 +72,7 @@ pub(super) const EXECUTION_DEFINITIONS: &[ToolDefinition] = &[
                 super::ToolSessionEvidencePolicy::NONE,
             ),
             "Preferred portable project build gateway. Runner resolves the nearest unambiguous Rust/Go recipe and executes canonical cargo build or go build argv. Go project builds run in Runner-owned single-module mode (GO111MODULE=on, GOWORK=off), so ambient module/workspace mode cannot change the planned graph. Optional scope selects either bounded explicit packages or all_packages=true. Rust all-packages is admitted only for a Cargo workspace whose effective root is the registered Project root; Go all-packages keeps the Runner-owned ./... single-module scope. dependency_policy.mode=locked forbids adapters from repairing dependency selection state (Cargo --locked; Go -mod=readonly); it does not imply offline execution. Long builds remain the same durable Job; pending never authorizes retry.",
-        )
+        ).with_discovery_keywords(&["compile", "build", "project", "编译", "构建", "项目"])
         .with_execution(super::ToolExecutionContract::new(
             super::ToolExecutionForm::ProjectBuild,
             super::ToolExecutionLifetime::Runner,
@@ -111,7 +111,7 @@ pub(super) const EXECUTION_DEFINITIONS: &[ToolDefinition] = &[
                 true,
                 super::ToolSessionEvidencePolicy::NONE,
             ),
-            "Run one native executable with structured literal argv. Use run_shell for shell grammar/short chains and run_script for program text. interactive=true retains piped stdin and returns a public Job for keyed write_job_input bytes/EOF; no PTY, initial stdin, named SSH or structured validation evidence. Otherwise stdin is a bounded payload then EOF. Windows batch shims use Runner-owned quoting. timeout_secs defaults to 60s and clamps at 7 days. Pending stays the same execution, owned by Runner: retain its exact continuation as fallback and continue independent work. Same-Window/Project/Session calls may surface sparse terminal Job attention. Use observe_jobs only for logs/details/recovery; bounded wait_for_job_readiness when terminal outcome blocks progress. No automatic next turn or redispatch. Persistent shell is only for retained same-process or repeated named-SSH state. Use run_detached_process only when the child must survive Runner restart/upgrade/stop/replacement, never for duration alone.",        )
+            "Run one native executable with structured literal argv. Use run_shell for shell grammar/short chains and run_script for program text. interactive=true retains piped stdin and returns a public Job for keyed write_job_input bytes/EOF; no PTY, initial stdin, named SSH or structured validation evidence. Otherwise stdin is a bounded payload then EOF. Windows batch shims use Runner-owned quoting. timeout_secs defaults to 60s and clamps at 7 days. Pending stays the same execution, owned by Runner: retain its exact continuation as fallback and continue independent work. Same-Window/Project/Session calls may surface sparse terminal Job attention. Use observe_jobs only for logs/details/recovery; bounded wait_for_job_readiness when terminal outcome blocks progress. No automatic next turn or redispatch. Persistent shell is only for retained same-process or repeated named-SSH state. Use run_detached_process only when the child must survive Runner restart/upgrade/stop/replacement, never for duration alone.",        ).with_discovery_keywords(&["start", "run", "execute", "executable", "literal", "arguments", "argv", "program", "command", "启动", "运行", "执行", "程序", "字面量", "参数", "命令"])
         .with_execution(super::ToolExecutionContract::new(
             super::ToolExecutionForm::NativeArgv,
             super::ToolExecutionLifetime::Runner,
@@ -152,7 +152,7 @@ pub(super) const EXECUTION_DEFINITIONS: &[ToolDefinition] = &[
                 super::ToolSessionEvidencePolicy::NONE,
             ),
             "Start a supervisor-owned detached native process as a durable Job when accepted work must outlive the initiating Runner process. Use it from the start when the workflow will restart, upgrade, stop, or replace this Runner and a native child must remain alive across Runner exit or replacement. Duration alone is not a reason to detach: ordinary long work stays Runner-owned. timeout_secs defaults to 60 seconds and the total detached execution lifetime clamps at 7 days. Ownership is handed off before payload start; after restart or upgrade, a replacement Runner can recover the same logical Job only when the supervisor/native identity and lifetime fence reconcile. A bounded replay key prevents duplicate dispatch while retained; expired keys are not retry tokens. Observe or stop with Job tools. No shell, script, SSH-resource, or retry fallback.",
-        )
+        ).with_discovery_keywords(&["background", "detached", "daemon", "service", "process", "后台", "脱离", "守护", "服务", "程序"])
         .with_execution(super::ToolExecutionContract::new(
             super::ToolExecutionForm::NativeArgv,
             super::ToolExecutionLifetime::Supervisor,
@@ -191,7 +191,7 @@ pub(super) const EXECUTION_DEFINITIONS: &[ToolDefinition] = &[
             super::ToolSessionEvidencePolicy::NONE,
         ),
             "Run bounded sh, bash, PowerShell, Python, JavaScript, or TypeScript as typed Runner-owned script data. Prefer run_process for native argv, run_script for computation/inspection/generation/non-source transforms or program-like scripts, and run_shell for shell grammar. Project-source mutation should normally use canonical structured editors rather than script writes. Long work stays the same execution and remains Runner-owned; timeout_secs defaults to 60s and clamps at 7 days. If the result is execution_state=pending, keep its exact continuation as fallback and continue independent work. Same-Window/Project/Session results may surface sparse terminal Job attention. Use observe_jobs only for logs/details/recovery; use bounded wait_for_job_readiness when terminal outcome blocks progress in the current turn. No automatic next turn. Script bodies never become shell command text. Detach only when a native child must survive Runner restart/upgrade/stop/replacement.",
-        )
+        ).with_discovery_keywords(&["run", "execute", "script", "code", "interpreter", "python", "javascript", "运行", "执行", "脚本", "解释器"])
         .with_execution(super::ToolExecutionContract::new(
             super::ToolExecutionForm::TypedScript,
             super::ToolExecutionLifetime::Runner,
@@ -229,7 +229,7 @@ pub(super) const EXECUTION_DEFINITIONS: &[ToolDefinition] = &[
                 super::ToolSessionEvidencePolicy::NONE,
             ),
             "Run bounded shell grammar or a short related command chain; prefer run_process for literal argv and run_script for program-like scripts. Predetermined related observations may share one command, but result-dependent follow-ups stay sequential. Project-source mutation should normally use canonical structured editors rather than shell writes. Long work stays one Runner-owned execution; timeout_secs is total lifetime and Server timing policy controls Job-handoff grace. If the result is execution_state=pending, keep its exact continuation as fallback and continue independent work. Same-Window/Project/Session results may surface sparse terminal Job attention. Use observe_jobs only for logs/details/recovery; use bounded wait_for_job_readiness when terminal outcome blocks progress in the current turn. No automatic next turn. Duration alone does not select a detached primitive.",
-        )
+        ).with_discovery_keywords(&["run", "execute", "shell", "command", "pipeline", "pipes", "terminal", "bash", "powershell", "运行", "执行", "命令", "管道", "终端"])
         .with_execution(super::ToolExecutionContract::new(
             super::ToolExecutionForm::ShellCommand,
             super::ToolExecutionLifetime::Runner,
@@ -405,7 +405,7 @@ pub(super) const EXECUTION_DEFINITIONS: &[ToolDefinition] = &[
                 super::ToolSessionEvidencePolicy::NONE,
             ),
             "Stop one existing WebCodex Job by job_id. Requires confirm=true and preserves project/session ownership; log bodies are not returned.",
-        ),
+        ).with_discovery_keywords(&["cancel", "stop", "terminate", "job", "process", "取消", "停止", "终止", "作业", "进程"]),
         PERMISSION_RISK_JOB,
     ),
     adaptive_runtime_direct(
@@ -439,7 +439,7 @@ pub(super) const EXECUTION_DEFINITIONS: &[ToolDefinition] = &[
                 super::ToolHostOrchestrationHint::sequential().with_native_batch_field("items"),
             ),
             "Explicit logs/details/recovery for a known pending execution; not the default follow-up to execution_state=pending. A continuation is fallback, not a next-action command. Prefer passive terminal attention; do not call list_jobs first. Prefer observation_ref, or pass observation_token unchanged as after_observation_token. No token or no wait_secs gives an immediate observation. With tokens, bounded wait_secs defaults to wake_on=change; use wake_on=meaningful_change to suppress sequence-only heartbeat wakes while still waking for logs/lifecycle/activity/recovery, or wake_on=terminal only when useful progress is blocked on terminal outcome. If independent work remains, continue it; do not poll for visibility or repeatedly observe the same Job. terminal wakes on any terminal Job; all_terminal waits for all. Item errors return immediately; timeout may include changed=true. summary_only compacts successful validation logs. Never launches, retries, stops, or subscribes.",
-        ),
+        ).with_discovery_keywords(&["observe", "poll", "job", "progress", "output", "logs", "status", "观察", "作业", "进度", "输出", "日志", "状态"]),
         80,
         super::ToolDirectReason::CoreWorkflow,
     ),
@@ -535,7 +535,7 @@ pub(super) const LISTING_DEFINITIONS: &[ToolDefinition] = &[
             super::ToolActivityInteraction::Meaningful,
         ),
         "Recovery and inventory primitive for caller-visible Jobs, not the normal continuation step. Do not call list_jobs when the initiating pending result already provides an exact continuation or passive attention already identifies the execution; retain that continuation and continue independent work, using observe_jobs only when logs/details/recovery are needed. Use list_jobs when exact Job identity was lost, unknown_job explicitly requests inventory recovery, the user asks to enumerate background work, or multiple historical/parallel Jobs must be inspected. Exact project/session_id filters are preferred when known and combine with status using AND semantics. stdout/stderr bodies are never included; exact Job logs belong to observe_jobs.",
-    ), 79, super::ToolDirectReason::CoreWorkflow),
+    ).with_discovery_keywords(&["list", "background", "jobs", "tasks", "running", "列出", "后台", "作业", "任务", "运行"]), 79, super::ToolDirectReason::CoreWorkflow),
     adaptive_runtime_direct(model_spec(
             def(
                 "present_job_terminal_continuation",

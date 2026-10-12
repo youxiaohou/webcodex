@@ -37,6 +37,8 @@ use webcodex_tool_contracts::registry::ToolDescriptor;
 #[cfg(feature = "experimental-code-mode")]
 use webcodex_tool_contracts::ToolSpec;
 
+pub(super) mod discovery;
+
 const TOOL_MANIFEST_SELECTION_DESCRIPTION_MAX_CHARS: usize = 180;
 #[cfg(feature = "experimental-code-mode")]
 pub(crate) const CODE_MODE_CALLABLE_CONTRACT_HARD_MAX_BYTES: usize = 16 * 1024;
@@ -865,26 +867,7 @@ impl ToolRuntime {
             .map(|q| q.trim().to_lowercase())
             .filter(|q| !q.is_empty());
         if let Some(query) = query.as_deref() {
-            let terms = query.split_whitespace().collect::<Vec<_>>();
-            filtered_specs.retain(|spec| {
-                let haystack = format!(
-                    "{} {} {}",
-                    spec.name,
-                    runtime_tool_category(&spec.name),
-                    spec.description
-                )
-                .to_lowercase();
-                terms.iter().all(|term| haystack.contains(term))
-            });
-            // Exact names and name matches beat incidental words in safety prose.
-            let name_query = terms.join("_");
-            filtered_specs.sort_by_key(|spec| {
-                (
-                    spec.name != name_query,
-                    !terms.iter().all(|term| spec.name.contains(term)),
-                    spec.name.as_str(),
-                )
-            });
+            discovery::rank(&mut filtered_specs, query);
         }
         let limit = limit.or_else(|| query.as_ref().map(|_| 20));
         let filtered_count = filtered_specs.len();

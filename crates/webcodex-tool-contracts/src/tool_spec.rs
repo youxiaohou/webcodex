@@ -15,6 +15,9 @@ pub const MODEL_TOOL_DESCRIPTION_MAX_CHARS: usize = 1536;
 pub struct ToolSpec {
     pub name: String,
     pub description: String,
+    /// Canonical retrieval metadata; keep public MCP descriptors unchanged.
+    #[serde(skip)]
+    pub discovery_keywords: &'static [&'static str],
     pub input_schema: Value,
     pub output_schema: Value,
     pub annotations: Value,

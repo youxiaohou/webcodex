@@ -122,6 +122,9 @@ fn assert_builtin_workflow(output: &Value) {
     assert!(recovery.contains("read_session_handoff"));
     assert!(recovery.contains("exact session_id"));
     assert!(recovery.contains("basis completeness"));
+    assert!(recovery.contains("Snapshot changed: re-read exact handoff"));
+    assert!(recovery
+        .contains("latest instructions/decisions/progress/validation before dependent work"));
     assert!(recovery.contains("only after task-context loss/compaction/restart"));
     assert!(recovery.contains("Never use it for routine progress/baselines"));
     assert!(workflow["model_protocol"]

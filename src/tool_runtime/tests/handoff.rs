@@ -1,5 +1,7 @@
 //! Tests for `read_session_handoff` — read-only structured handoff tool.
 
+mod continuity;
+
 use super::super::*;
 use super::support::*;
 use crate::auth::AuthContext;

@@ -346,6 +346,7 @@ pub(super) fn mcp_tools_list_payload_with_features_for_auth(
                 let spec = ToolDescriptor {
                     name: "list_sessions".into(),
                     description: description.into(),
+                    discovery_keywords: definition.model_spec.unwrap().discovery_keywords,
                 };
                 for spec in filter_descriptors_for_oauth(vec![spec], auth) {
                     let mut value = mcp_tool_descriptor_json(spec, compact, false, None);

@@ -100,7 +100,7 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
             super::ToolSessionEvidencePolicy::NONE.exploration(super::ToolExplorationEvidence::Navigation(super::ToolNavigationEvidenceKind::Hover)),
         ),
         "Read a symbol's type and documentation at a 1-based Unicode scalar position through the Project's language server; no source edit. MarkupContent and MarkedString forms are normalized to bounded markdown/plaintext; invalid optional ranges are omitted.",
-    ),
+    ).with_discovery_keywords(&["symbol", "documentation", "type", "signature", "hover", "符号", "文档", "类型", "签名", "悬浮"]),
     model_spec(
         def(
             "list_workspace_symbols",

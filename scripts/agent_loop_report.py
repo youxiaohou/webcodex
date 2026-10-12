@@ -32,7 +32,8 @@ LEGACY_CODE_MODE_SURFACE_ALIASES = {
 }
 CODE_MODE_SURFACE_CHOICES = (*CANONICAL_CODE_MODE_SURFACES, *LEGACY_CODE_MODE_SURFACE_ALIASES)
 HOST_CODE_MODE_SURFACE = "host_code_mode"
-BENCHMARK_VARIANTS = ("direct", "host_code_mode", "code_mode")
+TOOL_SELECTION_VARIANT = "tool_selection"
+BENCHMARK_VARIANTS = ("direct", "host_code_mode", "code_mode", TOOL_SELECTION_VARIANT)
 RUN_ANNOTATION_SCHEMA_VERSION = 1
 REPAIR_REASONS = frozenset((
     "invalid_arguments",
@@ -144,6 +145,11 @@ def validate_case_manifest(value: Any) -> dict[str, Any]:
         if not isinstance(case["validation"].get("required"), bool):
             raise ReportError(f"cases[{index}].validation.required must be a boolean")
         surface = case.get("code_mode_surface")
+        experiment = case.get("experiment", "forced_lanes")
+        if experiment not in ("forced_lanes", "tool_selection"):
+            raise ReportError(f"cases[{index}].experiment is unsupported")
+        if experiment == "tool_selection" and surface is not None:
+            raise ReportError("tool_selection cases must not prescribe code_mode_surface")
         if surface is not None and _canonical_code_mode_surface(surface) is None:
             raise ReportError(
                 f"cases[{index}].code_mode_surface must be one of read_only, validation, or guarded_edit"
@@ -221,7 +227,7 @@ def validate_run_annotation(value: Any) -> dict[str, Any]:
     _require_nonempty_string(value.get("case_id"), "run annotation case_id")
     variant = value.get("variant")
     if variant not in BENCHMARK_VARIANTS:
-        raise ReportError("run annotation variant must be direct, host_code_mode, or code_mode")
+        raise ReportError("run annotation variant must be direct, host_code_mode, code_mode, or tool_selection")
     surface = value.get("surface")
     if variant == "direct":
         if surface != "direct":
@@ -229,6 +235,9 @@ def validate_run_annotation(value: Any) -> dict[str, Any]:
     elif variant == "host_code_mode":
         if surface != HOST_CODE_MODE_SURFACE:
             raise ReportError("host_code_mode run annotation requires surface=host_code_mode")
+    elif variant == TOOL_SELECTION_VARIANT:
+        if surface != TOOL_SELECTION_VARIANT:
+            raise ReportError("tool_selection run annotation requires surface=tool_selection")
     elif _canonical_code_mode_surface(surface) is None:
         raise ReportError("code_mode run annotation requires surface=read_only, validation, or guarded_edit")
     if not _is_exact_git_revision(value.get("base_revision")):
@@ -1700,6 +1709,64 @@ def _observed_span_ms(outer: list[dict[str, Any]]) -> int | None:
     return span if span >= 0 else None
 
 
+def _summarize_native_batch(
+    outer: list[dict[str, Any]], *, action_audit_available: bool,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Requested cardinality from admitted outer calls, never completed work.
+
+    Missing canonical identity (including gateway calls) makes coverage unknown.
+    Child calls inside Code Mode are deliberately outside this measurement.
+    """
+    fields = {"read_files": "requested_items", "search_project_texts": "requested_queries"}
+    calls: Counter[str] = Counter()
+    measured: dict[str, list[int]] = {tool: [] for tool in fields}
+    unidentified = 0
+    for event in outer:
+        telemetry = _input_ergonomics_record(event)
+        tool = telemetry.get("tool_name") if isinstance(telemetry, dict) else None
+        if not isinstance(tool, str) or not tool:
+            unidentified += 1
+            continue
+        if tool not in fields:
+            continue
+        calls[tool] += 1
+        facts = telemetry.get("native_batch")
+        field = fields[tool]
+        if (
+            type(telemetry.get("schema_version")) is int
+            and telemetry["schema_version"] >= 13
+            and isinstance(facts, dict)
+            and set(facts) == {"kind", field}
+            and facts.get("kind") == tool
+            and type(facts.get(field)) is int
+            and 1 <= facts[field] <= 8
+        ):
+            measured[tool].append(facts[field])
+    result = {}
+    for tool in fields:
+        values = measured[tool]
+        complete = action_audit_available and unidentified == 0 and len(values) == calls[tool]
+        distribution = _metric_distribution(values, missing=calls[tool] - len(values))
+        if not action_audit_available or not complete or not values:
+            distribution["total"] = None
+        result[tool] = {
+            "outer_calls": calls[tool] if action_audit_available and not unidentified else None,
+            "observed_outer_calls": calls[tool] if action_audit_available else None,
+            "observed_multi_item_calls": sum(value > 1 for value in values) if action_audit_available else None,
+            "multi_item_calls": sum(value > 1 for value in values) if complete else None,
+            "requested_cardinality": distribution,
+        }
+    available = action_audit_available and unidentified == 0 and all(len(measured[t]) == calls[t] for t in fields)
+    return result, {
+        "available": available,
+        "reason": None if available else (
+            "native batch evidence requires ActionAudit" if not action_audit_available
+            else "one or more outer calls lack canonical tool identity" if unidentified
+            else "one or more native calls lack valid admitted requested-cardinality evidence"
+        ),
+    }
+
+
 def _summarize_audit(
     audit_events: list[dict[str, Any]],
     variant: str | None,
@@ -1733,6 +1800,7 @@ def _summarize_audit(
     output_transfer, output_transfer_availability = _summarize_output_transfer(
         outer, action_audit_available=True
     )
+    native_batch, native_batch_availability = _summarize_native_batch(outer, action_audit_available=True)
 
     failure_kinds: Counter[str] = Counter()
     recovery_guidance: Counter[str] = Counter()
@@ -1767,11 +1835,16 @@ def _summarize_audit(
     host_short_chain, host_short_chain_availability = _summarize_host_short_chains(
         outer, continuity_events
     )
-    canonical_observed = len(present_telemetries)
-    canonical_by_name = Counter(value["tool_name"] for _, value in present_telemetries if isinstance(value.get("tool_name"), str) and value["tool_name"])
-    if variant in ("direct", "host_code_mode"):
+    canonical_records = (
+        [value for event in outer if (value := _input_ergonomics_record(event)) is not None]
+        if variant == TOOL_SELECTION_VARIANT
+        else [value for _, value in present_telemetries]
+    )
+    canonical_observed = len(canonical_records)
+    canonical_by_name = Counter(value["tool_name"] for value in canonical_records if isinstance(value.get("tool_name"), str) and value["tool_name"])
+    if variant in ("direct", "host_code_mode", TOOL_SELECTION_VARIANT):
         canonical_total = canonical_observed if canonical_observed == len(outer) else None
-        canonical_reason = None if canonical_total is not None else "one or more outer calls lack ModelErgonomics evidence"
+        canonical_reason = None if canonical_total is not None else "one or more outer calls lack valid canonical ModelErgonomics evidence"
     elif variant == "code_mode":
         canonical_total = None
         canonical_reason = "canonical_calls.total keeps the outer/direct counting contract; use composition.nested_calls for persisted Code Mode child-call totals"
@@ -1821,6 +1894,7 @@ def _summarize_audit(
         },
         "results": {"serialized_tool_result_bytes": result_byte_metric},
         "output_transfer": output_transfer,
+        "native_batch": native_batch,
         "failures": {
             "error_kind_by_name": dict(sorted(error_kinds.items())),
             "failure_kind_by_name": dict(sorted(failure_kinds.items())),
@@ -1865,6 +1939,7 @@ def _summarize_audit(
                     else "one or more edit outcome labels are unknown or malformed"
                 ),
             },
+            "native_batch": native_batch_availability,
             "code_mode_composition": composition_availability,
             "host_short_chain": host_short_chain_availability,
             "host_same_model_turn_identity": {
@@ -1915,7 +1990,9 @@ def _summarize_trace_only(trace_events: list[dict[str, Any]], variant: str | Non
     output_transfer, output_transfer_availability = _summarize_output_transfer(
         [], action_audit_available=False
     )
+    native_batch, native_batch_availability = _summarize_native_batch([], action_audit_available=False)
     unavailable = {
+        "native_batch": native_batch_availability,
         "output_transfer": output_transfer_availability,
         "webcodex_service_timing": {"available": False, "reason": "tool_handler_returned duration is not the canonical request-observed to response-handoff service interval"},
         "tool_runtime_timing": {"available": False, "reason": "events.jsonl does not persist canonical ModelErgonomics runtime duration evidence"},
@@ -1960,6 +2037,7 @@ def _summarize_trace_only(trace_events: list[dict[str, Any]], variant: str | Non
         },
         "results": {"serialized_tool_result_bytes": _metric_distribution([], missing=len(handlers))},
         "output_transfer": output_transfer,
+        "native_batch": native_batch,
         "failures": {"error_kind_by_name": {}, "failure_kind_by_name": {}, "recovery_guidance_by_kind": {}, "child_failure_kind_by_name": None, "resolved_recoveries": None},
         "availability": {
             "action_audit": {"available": False, "reason": "no ActionAudit DB evidence was provided"},
@@ -2121,10 +2199,18 @@ def _benchmark_metadata(*, case_manifest: Path | None, case_id: str | None, vari
             raise ReportError("--variant code_mode benchmark runs require --surface read_only, validation, or guarded_edit")
         if _canonical_code_mode_surface(surface) is None:
             raise ReportError("--variant code_mode requires --surface read_only, validation, or guarded_edit")
+    elif variant == TOOL_SELECTION_VARIANT:
+        if surface is None:
+            surface = TOOL_SELECTION_VARIANT
+        elif surface != TOOL_SELECTION_VARIANT:
+            raise ReportError("--variant tool_selection requires --surface tool_selection")
     if not _is_exact_git_revision(base_revision):
         raise ReportError("--case-id requires --base-revision as an exact 40-hex Git commit")
     manifest = load_case_manifest(case_manifest or DEFAULT_CASE_MANIFEST)
     case = _case_by_id(manifest, case_id)
+    experiment = case.get("experiment", "forced_lanes")
+    if (variant == TOOL_SELECTION_VARIANT) != (experiment == "tool_selection"):
+        raise ReportError("tool_selection cases and variants cannot be mixed with forced execution lanes")
     expected_surface = case.get("code_mode_surface")
     if (
         variant == "code_mode"
@@ -2140,6 +2226,7 @@ def _benchmark_metadata(*, case_manifest: Path | None, case_id: str | None, vari
         "case_id": case_id,
         "case_title": case["title"],
         "target": case["target"],
+        "experiment": experiment,
         "variant": variant,
         "surface": surface,
         "base_revision": base_revision,
@@ -2297,10 +2384,6 @@ def summarize(*, trace_root: Path | None, audit_db: Path | None, workflow_sessio
     )
     core["results"]["serialized_tool_result_bytes_by_tool"] = by_tool_bytes
     core["availability"]["serialized_tool_result_bytes_by_tool"] = by_tool_availability
-    core["availability"]["native_batch_usage"] = {
-        "available": False,
-        "reason": "current payload-safe ActionAudit composition does not persist native batch item counts",
-    }
     core["availability"]["promise_all_usage"] = {
         "available": False,
         "reason": "max_in_flight proves child-call concurrency, not JavaScript Promise.all syntax",
@@ -2316,6 +2399,7 @@ def summarize(*, trace_root: Path | None, audit_db: Path | None, workflow_sessio
         **core,
         "evidence": {"trace_files": trace_files, "trace_ids": len(trace_ids), "audit_events": len(audit_events), "workflow_session_selected": workflow_session_id is not None, "run_annotation": annotation is not None},
         "notes": [
+            "Workflow Session selection counts only linked calls; unlinked discovery/bootstrap calls are not attributed or treated as absent from the conversation",
             "observed_span_ms is the span between observed WebCodex outer-call timestamps, not task wall time",
             "outside_webcodex_gap_ms contains only canonical serial meaningful-Window gaps and is not model reasoning time",
             "input_ergonomics normalization rate excludes legacy/missing telemetry; its immediate same-tool corrective-call proxy proves neither model turns nor why the rejected call failed",
@@ -2343,6 +2427,12 @@ _COMPARISON_METRICS = [
     "observed_span_ms", "task_wall_time_ms", "model_round_trips", "model_round_trip_proxy",
     "outer_calls.total", "outer_calls.meaningful",
     "outer_calls.successful", "outer_calls.failed", "canonical_calls.total",
+    "native_batch.read_files.outer_calls",
+    "native_batch.read_files.multi_item_calls",
+    "native_batch.read_files.requested_cardinality.total",
+    "native_batch.search_project_texts.outer_calls",
+    "native_batch.search_project_texts.multi_item_calls",
+    "native_batch.search_project_texts.requested_cardinality.total",
     "repair_turns.total", "child_calls.failed",
     "runner.requests_observed", "composition.nested_calls.total",
     "composition.nested_successes.total", "composition.nested_failures.total",
@@ -2395,6 +2485,8 @@ def _case_compatibility(baseline: dict[str, Any], candidate: dict[str, Any]) -> 
         return {"comparable": False, "reason": "both reports must carry benchmark case metadata"}
     if left.get("case_id") != right.get("case_id"):
         return {"comparable": False, "reason": "benchmark case ids differ"}
+    if left.get("experiment", "forced_lanes") != right.get("experiment", "forced_lanes"):
+        return {"comparable": False, "reason": "benchmark experiments differ"}
     left_base, right_base = left.get("base_revision"), right.get("base_revision")
     if not _is_exact_git_revision(left_base) or not _is_exact_git_revision(right_base):
         return {"comparable": False, "reason": "both reports must record an exact 40-hex Git base revision"}
@@ -2426,6 +2518,10 @@ def _pair_compatibility(
         return case
     left = baseline.get("benchmark") or {}
     right = candidate.get("benchmark") or {}
+    if left.get("experiment", "forced_lanes") == "tool_selection":
+        if all(item.get("variant") == TOOL_SELECTION_VARIANT and item.get("surface") == TOOL_SELECTION_VARIANT for item in (left, right)):
+            return {"comparable": True, "reason": None}
+        return {"comparable": False, "reason": "tool_selection comparisons require two freely selected tool runs"}
     if left.get("variant") != "direct" or left.get("surface") != "direct":
         return {
             "comparable": False,
@@ -2598,7 +2694,7 @@ def _build_parser() -> argparse.ArgumentParser:
     summarize_parser.add_argument("--case-manifest", type=Path)
     summarize_parser.add_argument("--case-id")
     summarize_parser.add_argument("--variant", choices=BENCHMARK_VARIANTS)
-    summarize_parser.add_argument("--surface", choices=("direct", HOST_CODE_MODE_SURFACE, *CODE_MODE_SURFACE_CHOICES))
+    summarize_parser.add_argument("--surface", choices=("direct", HOST_CODE_MODE_SURFACE, TOOL_SELECTION_VARIANT, *CODE_MODE_SURFACE_CHOICES))
     summarize_parser.add_argument("--base-revision")
     summarize_parser.add_argument("--run-annotation", type=Path)
     summarize_parser.add_argument("--output", type=Path)
@@ -2606,6 +2702,10 @@ def _build_parser() -> argparse.ArgumentParser:
     compare_parser.add_argument("--baseline", type=Path, required=True)
     compare_parser.add_argument("--candidate", type=Path, required=True)
     compare_parser.add_argument("--output", type=Path)
+    discovery_parser = subparsers.add_parser("discovery", help="score captured tool retrievals against the fixed discovery corpus")
+    discovery_parser.add_argument("--corpus", type=Path, default=Path(__file__).with_name("agent_tool_discovery_cases.json"))
+    discovery_parser.add_argument("--results", type=Path, required=True)
+    discovery_parser.add_argument("--output", type=Path)
     return parser
 
 
@@ -2613,6 +2713,19 @@ def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     try:
+        if args.command == "discovery":
+            try:
+                from scripts import agent_tool_discovery as discovery
+            except ModuleNotFoundError:
+                import agent_tool_discovery as discovery
+            try:
+                corpus = discovery.load_corpus(args.corpus)
+                captured = discovery.load_results(args.results)
+                result = discovery.evaluate_results(corpus, captured)
+            except (OSError, ValueError) as exc:
+                raise ReportError(f"invalid discovery evidence: {exc}") from exc
+            _write_json(result, args.output)
+            return 0
         if args.command == "summarize":
             report = summarize(trace_root=args.trace_root, audit_db=args.audit_db, workflow_session_id=args.workflow_session_id, case_manifest=args.case_manifest, case_id=args.case_id, variant=args.variant, surface=args.surface, base_revision=args.base_revision, run_annotation=args.run_annotation)
             _write_json(report, args.output)

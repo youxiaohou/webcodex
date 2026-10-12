@@ -26,7 +26,7 @@ WebCodex 接收工具参数和结果，不会获得宿主对话中的每句话�
 
 1. 不知道项目身份时，通过 `list_projects` 发现授权 Project。调用 `list_sessions(project)`，可用 `lifecycle` 筛选，或用 `offset`、`limit` 分页。只统计并返回准确 Project 下、属于调用者 authority group 的 Session。
 2. 选择一个准确的 `session_id` 或返回的 `session_ref`。列表顺序仅用于展示；标题、最新一行或“继续”两个字都不能替代存在歧义时的任务选择。
-3. 读取 `read_session_handoff(session_id)`，也可显式提供匹配的 `project`。紧凑的 `handoff_brief.task.decisions` 和 `recent_progress` 带回最近记录的消息、状态、替代关系，以及覆盖范围和截断信息。默认 brief 小于 8 KiB；需要更多保留的待办、风险或消息详情时，使用 diagnostic handoff 或授权的 `list_session_messages`。行动前复查当前 Git、文件及过期的测试结论。
+3. 读取 `read_session_handoff(session_id)`，也可显式提供匹配的 `project`。紧凑的 `handoff_brief.task.decisions` 和 `recent_progress` 带回最近记录的消息、状态、替代关系，以及覆盖范围和截断信息。默认 brief 小于 8 KiB；需要更多保留的待办、风险或消息详情时，使用 diagnostic handoff 或授权的 `list_session_messages`。依赖快照前检查 `basis.complete` 和截断信息。若返回 `session_changed_during_snapshot` 或 `external_observations_changed_during_snapshot`，在执行依赖该上下文的工作前显式重读准确交接，获取最新指令、决策、进度和验证。遵循用户当前的纠正并保留外部修改。行动前复查当前 Git、文件及过期的测试结论：先前通过的验证不能证明已变更的源码。按准确身份恢复并观察已有运行中 Job，不要重新启动它。
 4. Active Session 可通过默认 checkout 模式的 `work_on_project(session_id, instruction, ...)` 显式恢复；已授权 Session 提供绑定的 Project，显式 Project 仍必须匹配。后续 Project 工具复用返回的 `project_ref`；当前模型需要项目规则和工作流时，请求 `_wc.context=["project.instructions", "webcodex.workflow"]`。Closed Session 可供恢复读取，但不能重新打开；应创建新任务并显式带入选定的上下文。
 
 原 Window 可用时，也可请求 `_wc.context=["workflow.resume"]` 获取已授权候选的 `session_ref` 及可用的当前 `project_ref`。这不会自动选定、恢复任务或设置 recorder。Fresh work 和 `mode="worktree"` 仍须明确 Project source。

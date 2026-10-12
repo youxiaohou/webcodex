@@ -2901,3 +2901,214 @@ async fn exact_manifest_ignores_irrelevant_presentation_limit() {
         assert_eq!(result.output["route"]["primary"]["mode"], "gateway");
     }
 }
+
+#[tokio::test]
+async fn natural_language_discovery_preserves_filters_bounds_and_exact_contracts() {
+    use crate::tool_runtime::kernel::ToolProtocolCapabilities;
+    use webcodex_tool_contracts::take_tool_materialization_counts_for_test as take_counts;
+    let runtime = test_runtime();
+    for (query, category, expected) in [
+        (
+            "Please show source context surrounding matches",
+            "file",
+            "search_file_context",
+        ),
+        ("查询已提交范围的变更统计", "git", "read_git_review_summary"),
+        (
+            "执行程序，使用参数而无需 shell 解释",
+            "execution",
+            "run_process",
+        ),
+        (
+            "Can I inspect symbol documentation?",
+            "lsp",
+            "read_symbol_hover",
+        ),
+    ] {
+        take_counts();
+        let result = runtime
+            .tool_manifest(
+                None,
+                None,
+                Some(category.into()),
+                None,
+                false,
+                false,
+                Some(query.into()),
+                Some(5),
+                ToolProtocolCapabilities::default(),
+            )
+            .await;
+        assert!(result.success, "{query}: {result:?}");
+        assert!(
+            result.output["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|t| t["name"] == expected),
+            "{query}: {result:?}"
+        );
+        assert_eq!(take_counts(), (0, 0), "retrieval must stay schema-free");
+        assert!(result.output["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|t| t["category"] == category));
+        assert!(result.output["contract"].is_null());
+        assert!(result.output.get("discovery_keywords").is_none());
+    }
+    for query in ["   READ_FILES   ", "read_files", "read_file"] {
+        let result = runtime
+            .dispatch(
+                ToolCall::from_tool_name("read_tool_manifest", json!({"query":query,"limit":1}))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(result.output["tools"][0]["name"], "read_files");
+        assert_eq!(result.output["returned_count"], 1);
+    }
+    let partial = runtime
+        .dispatch(
+            ToolCall::from_tool_name(
+                "read_tool_manifest",
+                json!({"query":"edit_project","limit":5}),
+            )
+            .unwrap(),
+        )
+        .await;
+    assert!(partial.output["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|tool| tool["name"] == "edit_project_files"));
+    let filtered = runtime
+        .dispatch(
+            ToolCall::from_tool_name(
+                "read_tool_manifest",
+                json!({"query":"read_files","category":"git"}),
+            )
+            .unwrap(),
+        )
+        .await;
+    assert!(filtered.output["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|tool| tool["name"] != "read_files" && tool["category"] == "git"));
+    for query in [
+        "teleport_workspace_now",
+        "不存在的火星咒语",
+        "the and please",
+        "does",
+    ] {
+        let result = runtime
+            .dispatch(
+                ToolCall::from_tool_name("read_tool_manifest", json!({"query":query})).unwrap(),
+            )
+            .await;
+        assert_eq!(result.output["count"], 0, "{query}: {result:?}");
+    }
+    for query in ["x".repeat(201), "read\nfile".into()] {
+        let result = runtime
+            .tool_manifest(
+                None,
+                None,
+                None,
+                None,
+                false,
+                false,
+                Some(query),
+                None,
+                ToolProtocolCapabilities::default(),
+            )
+            .await;
+        assert!(!result.success);
+        assert_eq!(result.error.as_deref(), Some("invalid_discovery_query"));
+    }
+    let exact = runtime
+        .dispatch(
+            ToolCall::from_tool_name("read_tool_manifest", json!({"tool_name":"run_process"}))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(exact.output["contract"]["name"], "run_process");
+    assert!(exact.output["contract"]["input_schema"]["properties"]
+        .get("executable")
+        .is_some());
+    assert!(exact.output["contract"].get("discovery_keywords").is_none());
+    let intent = runtime
+        .dispatch(
+            ToolCall::from_tool_name(
+                "read_tool_manifest",
+                json!({"query":"运行程序","intent":"coding","limit":1}),
+            )
+            .unwrap(),
+        )
+        .await;
+    assert_eq!(intent.output["intent"], "coding");
+    assert_eq!(intent.output["count"], 1);
+    assert_eq!(intent.output["tools"][0]["name"], "run_process");
+}
+
+#[test]
+fn natural_language_discovery_weights_fields_and_breaks_ties_stably() {
+    use webcodex_tool_contracts::registry::ToolDescriptor;
+    let descriptor = |name: &str, description: &str, discovery_keywords| ToolDescriptor {
+        name: name.into(),
+        description: description.into(),
+        discovery_keywords,
+    };
+    let descriptors = [
+        descriptor("zulu", "needle", &[]),
+        descriptor("alpha", "needle", &[]),
+        descriptor("task", "", &["needle"]),
+        descriptor("needle_reader", "", &[]),
+        descriptor("needle", "", &[]),
+    ];
+    for order in [vec![0, 1, 2, 3, 4], vec![4, 3, 2, 1, 0]] {
+        let mut selected = order.into_iter().map(|i| &descriptors[i]).collect();
+        super::super::super::surface::discovery::rank(&mut selected, "needle");
+        assert_eq!(
+            selected
+                .into_iter()
+                .map(|t| t.name.as_str())
+                .collect::<Vec<_>>(),
+            ["needle", "needle_reader", "task", "alpha", "zulu"]
+        );
+    }
+}
+
+#[tokio::test]
+async fn natural_language_discovery_exact_names_rank_first_across_admitted_catalog() {
+    use crate::tool_runtime::kernel::ToolProtocolCapabilities;
+
+    let runtime = test_runtime();
+    let catalog = runtime
+        .tool_manifest(
+            None,
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+            None,
+            ToolProtocolCapabilities::default(),
+        )
+        .await;
+    assert!(catalog.success, "{catalog:?}");
+    let tools = catalog.output["tools"].as_array().unwrap();
+    assert!(!tools.is_empty());
+    for tool in tools {
+        let name = tool["name"].as_str().unwrap();
+        let result = runtime
+            .dispatch(
+                ToolCall::from_tool_name("read_tool_manifest", json!({"query": name, "limit": 1}))
+                    .unwrap(),
+            )
+            .await;
+        assert!(result.success, "{name}: {result:?}");
+        assert_eq!(result.output["tools"][0]["name"], name, "{result:?}");
+        assert_eq!(result.output["returned_count"], 1);
+    }
+}

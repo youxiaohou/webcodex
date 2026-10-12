@@ -481,6 +481,69 @@ fn handoff_brief_fresh_active_session_is_stable_and_ready() {
 }
 
 #[test]
+fn handoff_brief_snapshot_races_require_reread_before_continuing() {
+    let store = store_with_limit(200);
+    let session_id = start_session(
+        &store,
+        &format!("{}{}", "\u{0001}".repeat(500), "🦀".repeat(100)),
+    );
+    add_instruction(
+        &store,
+        &session_id,
+        &format!("{}{}", "\u{0002}".repeat(500), "界".repeat(100)),
+    );
+    let summary = store.summary(&session_id, Some(200)).unwrap();
+    let discussion = discussion(&store, &session_id);
+    let workspace = clean_workspace();
+    let validation = passed_validation();
+    let continuation = json!({"status": "available", "attempt": {}});
+    for (session_changed, external_changed, reason) in [
+        (true, false, "session_changed_during_snapshot"),
+        (false, true, "external_observations_changed_during_snapshot"),
+        (true, true, "session_changed_during_snapshot"),
+    ] {
+        for jobs in [empty_jobs(), jobs_summary(1, 0, 0)] {
+            let brief = build_handoff_brief(HandoffBriefInput {
+                session_summary: &summary,
+                discussion: Some(&discussion),
+                continuation_feedback: &continuation,
+                workspace_requested: true,
+                workspace: Some(&workspace),
+                validation_requested: true,
+                validation: Some(&validation),
+                jobs: Some(&jobs),
+                external_observations: None,
+                guidance_available: true,
+                session_changed_during_snapshot: session_changed,
+                external_observations_changed_during_snapshot: external_changed,
+                existing_suggested_actions: None,
+            });
+            assert_eq!(brief["basis"]["complete"], false);
+            assert!(brief["basis"]["reason_codes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(reason)));
+            assert_eq!(brief["progress"]["state"], "insufficient_evidence");
+            assert_eq!(
+                brief["next_actions"][0],
+                "re-read read_session_handoff for the exact Session before dependent work"
+            );
+            assert!(!brief["next_actions"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("continue with the next task step")));
+            // Snapshot incompleteness must retain the Job observation; it never
+            // supplies authority to replace an execution.
+            assert_eq!(
+                brief["attention"]["blocking_jobs"],
+                jobs["blocking_active_count"]
+            );
+            assert!(handoff_brief_size(&brief) < HANDOFF_BRIEF_HARD_MAX_BYTES);
+        }
+    }
+}
+
+#[test]
 fn handoff_brief_root_and_latest_instructions_are_distinct_and_bounded() {
     let store = store_with_limit(200);
     let long_root = format!("root \"quoted\" \\\\ {}", "界".repeat(800));

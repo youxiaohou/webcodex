@@ -548,7 +548,29 @@ impl ToolRuntime {
             }
             return ToolResult::ok(handoff);
         }
-        let compact = compact_handoff_output(&output, &facts);
+        let snapshot_changed =
+            session_changed_during_snapshot || external_observations_changed_during_snapshot;
+        if snapshot_changed {
+            // Keep the diagnostic actions aligned with the bounded brief. The
+            // captured facts remain useful history, but cannot authorize a next
+            // task step until the exact Session has been observed again.
+            let recovery_actions = output["handoff_brief"]["next_actions"].clone();
+            output["suggested_next_actions"] = recovery_actions.clone();
+            if let Some(actions) =
+                output.pointer_mut("/continuation_feedback/attempt/suggested_next_actions")
+            {
+                *actions = recovery_actions;
+            }
+        }
+        let mut compact = compact_handoff_output(&output, &facts);
+        if snapshot_changed {
+            // These optional aggregate completion conclusions require a coherent
+            // snapshot. Preserve facts, blockers, history and integrity without
+            // presenting the stale closeout decision as a current verdict.
+            let compact = compact.as_object_mut().expect("handoff projection object");
+            compact.remove("verdict");
+            compact.remove("task_outcome");
+        }
         for (key, value) in compact.as_object().unwrap() {
             if !include_validation && key == "validation" {
                 continue;

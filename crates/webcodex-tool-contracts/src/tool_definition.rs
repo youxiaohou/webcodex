@@ -290,6 +290,8 @@ impl ToolVisibility {
 #[derive(Debug, Clone, Copy)]
 pub struct ToolModelSpecDeclaration {
     pub description: &'static str,
+    /// Internal task vocabulary for discovery, never a tool alias or authority.
+    pub discovery_keywords: &'static [&'static str],
 }
 
 /// Declarative privacy contract for the bounded Tool Audit / Session-ledger
@@ -1040,6 +1042,15 @@ pub struct ToolDefinition {
 }
 
 impl ToolDefinition {
+    pub const fn with_discovery_keywords(mut self, keywords: &'static [&'static str]) -> Self {
+        let Some(mut spec) = self.model_spec else {
+            panic!("discovery keywords require a canonical model spec");
+        };
+        spec.discovery_keywords = keywords;
+        self.model_spec = Some(spec);
+        self
+    }
+
     pub const fn with_operator_extension_family(
         mut self,
         family: ToolOperatorExtensionFamily,
@@ -1207,7 +1218,10 @@ const fn def(
 
 const fn model_spec(definition: ToolDefinition, description: &'static str) -> ToolDefinition {
     ToolDefinition {
-        model_spec: Some(ToolModelSpecDeclaration { description }),
+        model_spec: Some(ToolModelSpecDeclaration {
+            description,
+            discovery_keywords: &[],
+        }),
         ..definition
     }
 }

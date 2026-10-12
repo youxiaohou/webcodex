@@ -100,6 +100,7 @@ fn every_canonical_variant_name_round_trips_without_aliasing() {
         let fixture = ToolSpec {
             name: name.clone(),
             description: String::new(),
+            discovery_keywords: &[],
             input_schema: schema.clone(),
             output_schema: Value::Null,
             annotations: Value::Null,

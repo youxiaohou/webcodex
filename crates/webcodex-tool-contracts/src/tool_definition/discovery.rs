@@ -18,7 +18,7 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
                 approval: super::ToolApprovalPolicy::None, idempotency: super::ToolIdempotency::PureRead },
             Some(PROJECT_READ), false, NoPath, false, false, super::ToolSessionEvidencePolicy::NONE),
         "Locate a registered workspace by exact Runner plus path or literal query; no Session or registration is created. Returns one resolved workspace or bounded ambiguous candidates, never the first fuzzy match. Git fields are cached Runner inventory, not current filesystem proof; incomplete inventory stays explicit. Starting or resuming work is a separate action. Gateway via call_runtime_tool.",
-    ),
+    ).with_discovery_keywords(&["locate", "resolve", "registered", "workspace", "path", "project", "定位", "已注册", "工作区", "路径", "项目"]),
     model_spec(
         def("unregister_projects", super::ToolAuditPolicy::TYPED_CANONICAL,
             ModelVisible, TOOL_CATEGORY_PROJECT, None, TOOL_PROVIDER_CONTROL,
@@ -26,7 +26,7 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
                 approval: super::ToolApprovalPolicy::Standard, idempotency: super::ToolIdempotency::NonIdempotent },
             Some(PROJECT_WRITE), false, NoPath, true, false, super::ToolSessionEvidencePolicy::NONE),
         "Preview or batch-remove (unregister) up to 16 explicit Project registrations with exact revisions; never delete files, directories, branches or Session history. Default dry_run=true inspects current registrations, not a lease. Execution requires dry_run=false and confirm=true; each item uses canonical owner/CAS/active-Job checks. Sequential, non-atomic, per-item outcomes; uncertainty stops remaining items. Never replay the batch blindly; reconcile exact failed or unknown items.",
-    ),
+    ).with_discovery_keywords(&["batch", "unregister", "remove", "registrations", "projects", "批量", "注销", "移除", "注册", "项目"]),
 
     model_spec(
         def(
@@ -83,7 +83,7 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
             super::ToolSessionEvidencePolicy::NONE,
         ),
         "Register an existing directory, including a non-Git or ad-hoc workspace, as a Project on one Runner. Successful onboarding returns the canonical Runtime Project id and a Server-issued project_ref when a stable root identity is available. Use this when the directory already exists; policy still bounds allowed paths.",
-    ),
+    ).with_discovery_keywords(&["register", "existing", "project", "directory", "注册", "现有", "项目", "目录"]),
     model_spec(
         def(
             "unregister_project",
@@ -129,7 +129,7 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
             super::ToolSessionEvidencePolicy::NONE,
         ),
         "Create a directory on one Runner and register it as a Project. Successful onboarding returns the canonical Runtime Project id and a Server-issued project_ref when a stable root identity is available. Use this for a new workspace; existing directories belong on the registration path.",
-    ),
+    ).with_discovery_keywords(&["create", "new", "project", "directory", "scaffold", "创建", "新建", "项目", "目录"]),
     model_spec(
         def(
             "list_runners",
@@ -191,7 +191,7 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
                 super::ToolHostOrchestrationHint::independent_parallel_read(),
             ),
             "Read runtime health and protocol/build/source alignment; exact client_id focuses one Runner and its Job concurrency. compact=true or summary_only=true selects sparse counts without inventories. Canonical/API default is full diagnostics; MCP defaults to sparse. Explicit compact=false adds bounded Server process and Session writer observations, not remote Runner resource measurements. Missing or unsupported measurements stay unavailable.",
-        ),
+        ).with_discovery_keywords(&["server", "runtime", "health", "runners", "connection", "status", "服务", "运行", "状态", "健康", "连接"]),
         20,
         super::ToolDirectReason::CoreWorkflow,
     ),

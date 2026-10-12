@@ -4218,7 +4218,7 @@ pub enum ToolCall {
         /// Optional exact model-visible runtime tool name for one-tool contract discovery.
         #[serde(default)]
         tool_name: Option<String>,
-        /// Literal tool-name/category/description keywords.
+        /// Natural-language task or exact tool name; ranks admitted tools only.
         #[serde(default)]
         #[schemars(length(max = 200))]
         query: Option<String>,

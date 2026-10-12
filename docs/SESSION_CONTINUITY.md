@@ -54,7 +54,14 @@ The recovery sequence is:
    recorded notes, their status, supersession, and coverage/truncation. The
    default brief stays below 8 KiB. Use the diagnostic handoff or authorized
    `list_session_messages` for additional retained todos, risks or note detail.
-   Recheck current Git/files and any stale test claims before acting.
+   Check `basis.complete` and truncation before relying on the snapshot. If
+   `session_changed_during_snapshot` or
+   `external_observations_changed_during_snapshot` is reported, explicitly
+   re-read the exact handoff for the latest instruction, decisions, progress and
+   validation before dependent work. Honor the user's current corrections and
+   preserve external edits. Recheck current Git/files and stale test claims:
+   an earlier passing validation does not prove changed source. Recover and
+   observe an existing running Job by its exact identity; do not restart it.
 4. For an Active Session, explicitly resume with
    `work_on_project(session_id, instruction, ...)` in default `checkout` mode. The
    authorized Session supplies its bound Project; an explicit Project must still match.

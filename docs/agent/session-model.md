@@ -201,7 +201,11 @@ bounded external-report snapshot and compares that retained projection again aft
 the other recovery reads. A Session fence change reports
 `session_changed_during_snapshot`; an accepted external-report change reports
 `external_observations_changed_during_snapshot`. Either makes `basis.complete=false`
-so the caller can explicitly re-observe before dependent work. This detects evidence
+and returns an explicit exact-handoff reread action before dependent work. An
+Active Session's progress is `insufficient_evidence` until a fresh observation;
+Job attention and the captured task/evidence sections remain observations, not
+permission to restart execution. The caller re-reads latest instructions,
+decisions, progress and validation. This detects evidence
 races without claiming atomicity across independent Runner workspace or Job reads,
 and without promoting external reports into Session revision or native execution
 truth. No handoff generation or replacement model-context revision is introduced or

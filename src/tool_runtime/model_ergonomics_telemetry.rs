@@ -6,6 +6,7 @@
 
 pub(crate) mod invocation;
 pub(crate) mod job_convergence;
+mod native_batch;
 #[cfg(test)]
 mod normalization_tests;
 pub(crate) mod output_transfer;
@@ -100,6 +101,7 @@ pub(crate) struct ModelErgonomicsTimer {
     edit: Option<EditFacts>,
     canonical_execution_state: Option<String>,
     input_normalization_code: Option<ToolInputNormalizationCode>,
+    native_batch: Option<native_batch::NativeBatchFacts>,
 }
 
 #[derive(Debug, Clone)]
@@ -117,6 +119,7 @@ pub(crate) struct ModelErgonomicsCompletion {
     edit: Option<EditFacts>,
     canonical_execution_state: Option<String>,
     input_normalization_code: Option<ToolInputNormalizationCode>,
+    native_batch: Option<native_batch::NativeBatchFacts>,
     pub(crate) job_convergence: Option<job_convergence::JobConvergenceRecord>,
 }
 
@@ -135,6 +138,8 @@ pub(crate) struct ModelErgonomicsRecord {
     pub(crate) serialized_result_bytes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) output_transfer: Option<output_transfer::OutputTransferFacts>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) native_batch: Option<native_batch::NativeBatchFacts>,
     pub(crate) error_kind: Option<String>,
     pub(crate) failure_kind: Option<String>,
     pub(crate) recovery_kind: Option<String>,
@@ -290,6 +295,7 @@ impl ModelErgonomicsTimer {
             edit: None,
             canonical_execution_state: None,
             input_normalization_code: None,
+            native_batch: None,
             readiness_requested_jobs: (tool_name == "wait_for_job_readiness")
                 .then(|| {
                     arguments
@@ -299,6 +305,14 @@ impl ModelErgonomicsTimer {
                 })
                 .flatten(),
         })
+    }
+
+    /// Count the requested entries only after canonical admission. This never
+    /// observes child invocations or infers how many entries completed.
+    pub(crate) fn capture_admitted_call(&mut self, call: &super::ToolCall) {
+        self.native_batch = (call.tool_name() == self.tool_name)
+            .then(|| native_batch::from_admitted_call(call))
+            .flatten();
     }
 
     /// Preserve bounded canonical facts before the late model projection.
@@ -332,6 +346,7 @@ impl ModelErgonomicsTimer {
             edit: self.edit,
             canonical_execution_state: self.canonical_execution_state,
             input_normalization_code: self.input_normalization_code,
+            native_batch: self.native_batch,
             job_convergence: None,
         }
     }
@@ -353,6 +368,7 @@ impl ModelErgonomicsTimer {
             edit: self.edit,
             canonical_execution_state: self.canonical_execution_state,
             input_normalization_code: self.input_normalization_code,
+            native_batch: self.native_batch,
             job_convergence: None,
         }
     }
@@ -458,6 +474,7 @@ impl ModelErgonomicsCompletion {
             output_transfer: success
                 .then(|| output_transfer::from_model_result(self.tool_name, output))
                 .flatten(),
+            native_batch: self.native_batch,
             error_kind,
             failure_kind,
             recovery_kind,

@@ -30,6 +30,7 @@ except ModuleNotFoundError:
 
 STATUS_VALUES = frozenset(("pass", "fail", "partial", "unsupported"))
 DEFAULT_CASES = ("readonly_review", "guarded_multi_file_edit", "long_validation_handoff")
+DEFAULT_SELECTION_CASES = ("selection_single_read", "selection_batch_read", "selection_cross_tool_review")
 VARIANTS = ("direct", "code_mode")
 # Selected, already-persisted metadata only. Model turns and raw payloads cannot
 # be reconstructed from Agent Loop summaries.
@@ -187,6 +188,10 @@ def _case(manifest: dict[str, Any], case_id: str) -> dict[str, Any]:
 
 
 def _surface(case: dict[str, Any], variant: str) -> str:
+    if variant == report.TOOL_SELECTION_VARIANT:
+        if case.get("experiment") != "tool_selection":
+            raise BenchmarkError("free selection requires an explicit tool_selection case")
+        return report.TOOL_SELECTION_VARIANT
     if variant == "direct":
         return "direct"
     surface = case.get("code_mode_surface")
@@ -446,7 +451,7 @@ def _annotation(
     if oracle["available"]:
         if oracle["passed"] is not True:
             correctness["task_verdict"] = "fail"
-        elif correctness.get("task_verdict") is None:
+        elif correctness.get("task_verdict") is None and case.get("experiment") != "tool_selection":
             correctness["task_verdict"] = "pass"
         if case["validation"]["required"] is False and correctness.get("validation_verdict") is None:
             correctness["validation_verdict"] = "not_required"
@@ -541,6 +546,16 @@ def _runtime_evidence_proven(
     composition_available = (
         report._get_path(summary, "availability.code_mode_composition.available") is True
     )
+    if variant == report.TOOL_SELECTION_VARIANT:
+        # Any admitted mix is valid here. The original forced-lane gate below
+        # still rejects mixtures; this experiment measures choice separately.
+        canonical_total = report._get_path(summary, "canonical_calls.total")
+        return (
+            surface == report.TOOL_SELECTION_VARIANT
+            and composition_available
+            and type(canonical_total) is int
+            and canonical_total == outer_total
+        )
     if variant == "direct":
         canonical_total = report._get_path(summary, "canonical_calls.total")
         return (
@@ -766,6 +781,7 @@ def _run_sample(
                 "WEBCODEX_BENCH_WORKSPACE": str(workspace),
                 "WEBCODEX_BENCH_CASE_ID": case["id"],
                 "WEBCODEX_BENCH_VARIANT": variant,
+                "WEBCODEX_BENCH_EXPERIMENT": case.get("experiment", "forced_lanes"),
                 "WEBCODEX_BENCH_SURFACE": surface,
                 "WEBCODEX_BENCH_BASE_REVISION": base_revision,
                 "WEBCODEX_BENCH_CASE_FINGERPRINT": report._case_fingerprint(case),
@@ -1002,6 +1018,8 @@ def run_benchmark(
         case_manifest.write_text(_read_manifest_at_revision(repo, resolved), encoding="utf-8")
         manifest = report.load_case_manifest(case_manifest)
         selected = [_case(manifest, case_id) for case_id in case_ids]
+        if any(case.get("experiment", "forced_lanes") != "forced_lanes" for case in selected):
+            raise BenchmarkError("tool_selection cases require --experiment tool_selection")
         unsupported_targets = sorted(
             {str(case.get("target")) for case in selected if case.get("target") != "webcodex_repository"}
         )
@@ -1080,8 +1098,78 @@ def run_benchmark(
             temp_owner.cleanup()
 
 
+def run_selection_benchmark(
+    *,
+    repo: Path,
+    base_revision: str,
+    driver_argv: list[str],
+    case_ids: list[str],
+    samples: int,
+) -> dict[str, Any]:
+    """Capture unrestricted tool choices without weakening forced-lane gates.
+
+    The caller-owned driver still supplies actual Host observations and an
+    independent correctness verdict. No driver or model is simulated here.
+    """
+    if samples < 1 or samples > 100:
+        raise BenchmarkError("selection samples must be 1..100")
+    if not case_ids or len(set(case_ids)) != len(case_ids):
+        raise BenchmarkError("selection requires unique non-empty case ids")
+    repo = _git_root(repo)
+    resolved = _require_exact_revision(repo, base_revision)
+    if _head_revision(repo) != resolved:
+        raise BenchmarkError("base revision must equal the current checkout HEAD")
+    with tempfile.TemporaryDirectory(prefix="webcodex-agent-selection-bench-") as tmp:
+        root = Path(tmp)
+        for name in ("worktrees", "receipts", "annotations"):
+            (root / name).mkdir()
+        case_manifest = root / "agent_loop_cases.json"
+        case_manifest.write_text(_read_manifest_at_revision(repo, resolved), encoding="utf-8")
+        selected = [_case(report.load_case_manifest(case_manifest), case_id) for case_id in case_ids]
+        if any(case.get("experiment") != "tool_selection" for case in selected):
+            raise BenchmarkError("selection runner requires explicit tool_selection cases")
+        if any(case.get("target") != "webcodex_repository" for case in selected):
+            raise BenchmarkError("selection worktree runner supports only target=webcodex_repository")
+        cases_out = []
+        for case in selected:
+            observations = [
+                _run_sample(
+                    repo, root, driver_argv, case,
+                    variant=report.TOOL_SELECTION_VARIANT,
+                    pair_index=index, ordinal=0,
+                    base_revision=resolved, case_manifest=case_manifest,
+                )
+                for index in range(samples)
+            ]
+            cases_out.append({"case_id": case["id"], "samples": observations})
+        statuses = [sample["status"] for case in cases_out for sample in case["samples"]]
+        return {
+            "schema_version": 1,
+            "kind": "agent_loop_selection_benchmark",
+            "experiment": "tool_selection",
+            "base_revision": resolved,
+            "samples_per_case": samples,
+            "case_ids": case_ids,
+            "sample_count": len(statuses),
+            "status_counts": {status: statuses.count(status) for status in sorted(STATUS_VALUES)},
+            "cases": cases_out,
+            "notes": [
+                "each sample uses a fresh detached Git worktree and an unrestricted tool-selection prompt",
+                "native batching is an invocation shape, not another execution surface",
+                "scripted MCP calls are runtime tests, not real ChatGPT Web or model-choice evidence",
+                "no optimal sequence, winner, exact model-turn count, or speedup is inferred",
+            ],
+        }
+
+
 def _human_summary(result: dict[str, Any]) -> str:
     counts = result["status_counts"]
+    if result.get("experiment") == "tool_selection":
+        return "\n".join([
+            f"Agent Loop tool selection {result['base_revision'][:8]}",
+            f"cases={len(result['case_ids'])} samples={result['sample_count']}",
+            "status " + " ".join(f"{key}={counts[key]}" for key in sorted(counts)),
+        ])
     lines = [
         f"Agent Loop benchmark {result['base_revision'][:8]}",
         f"cases={len(result['case_ids'])} pairs={result['pair_count']} samples={result['sample_count']}",
@@ -1113,6 +1201,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--driver", required=True, help="Host driver command, parsed with shlex; no shell is invoked")
     parser.add_argument("--case-id", action="append", dest="case_ids")
     parser.add_argument("--pairs", type=int, default=2)
+    parser.add_argument("--experiment", choices=("forced_lanes", "tool_selection"), default="forced_lanes")
+    parser.add_argument("--samples", type=int, default=2, help="repetitions per case in the tool_selection experiment")
     parser.add_argument("--output", type=Path)
     return parser
 
@@ -1123,13 +1213,18 @@ def main(argv: list[str] | None = None) -> int:
         driver_argv = shlex.split(args.driver)
         if not driver_argv:
             raise BenchmarkError("--driver must name an executable")
-        result = run_benchmark(
-            repo=args.repo.resolve(),
-            base_revision=args.base_revision,
-            driver_argv=driver_argv,
-            case_ids=args.case_ids or list(DEFAULT_CASES),
-            pairs=args.pairs,
-        )
+        if args.experiment == "tool_selection":
+            result = run_selection_benchmark(
+                repo=args.repo.resolve(), base_revision=args.base_revision,
+                driver_argv=driver_argv,
+                case_ids=args.case_ids or list(DEFAULT_SELECTION_CASES), samples=args.samples,
+            )
+        else:
+            result = run_benchmark(
+                repo=args.repo.resolve(), base_revision=args.base_revision,
+                driver_argv=driver_argv,
+                case_ids=args.case_ids or list(DEFAULT_CASES), pairs=args.pairs,
+            )
         if args.output:
             args.output.parent.mkdir(parents=True, exist_ok=True)
             args.output.write_text(_stable_json(result), encoding="utf-8")
