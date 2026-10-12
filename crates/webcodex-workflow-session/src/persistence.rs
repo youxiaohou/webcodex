@@ -473,6 +473,7 @@ pub fn cold_session_from_persisted(
             })?;
     let lifecycle = persisted.lifecycle;
     let raw = Arc::from(serde_json::value::to_raw_value(persisted)?);
+    let revision_raw = Arc::downgrade(&raw);
     Ok(ColdSessionRecord {
         session_id: persisted.session_id.clone(),
         project: persisted.project.clone(),
@@ -486,6 +487,9 @@ pub fn cold_session_from_persisted(
         console_list_cache: Arc::new(std::sync::Mutex::new(None)),
         resident_instructions: None,
         unfenced_completion_ids: Vec::new(),
+        revision_raw,
+        retained_events_observed: persisted.events_observed.max(persisted.events.len() as u64),
+        retained_message_revision: persisted.message_observation_revision,
     })
 }
 

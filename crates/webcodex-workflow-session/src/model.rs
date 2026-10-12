@@ -236,6 +236,12 @@ pub struct ColdSessionRecord {
     /// The durable format omits historical no-fence completion entries. A live
     /// residency round trip must preserve those entries rather than sanitize them.
     pub unfenced_completion_ids: Vec<String>,
+    /// Immutable revision index from the same canonical Cold bytes. The weak
+    /// allocation identity prevents a replaced/corrupt raw body from being
+    /// answered using metadata belonging to an earlier snapshot.
+    pub(crate) revision_raw: std::sync::Weak<RawValue>,
+    pub(crate) retained_events_observed: u64,
+    pub(crate) retained_message_revision: u64,
 }
 
 impl StoredSession {
