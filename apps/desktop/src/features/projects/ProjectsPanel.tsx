@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Button, NativeSelect, TextInput } from "@mantine/core";
 import { desktopApi } from "../../lib/desktop-api";
 import type { DesktopState } from "../../models/topology";
@@ -54,34 +54,69 @@ export function ProjectsPanel({ onComputerSettings, onState }: { onComputerSetti
   const [batchConfirm, setBatchConfirm] = useState(false);
   const [batchProgress, setBatchProgress] = useState("");
   const [batchIssues, setBatchIssues] = useState<string[]>([]);
+  const currentContext = useRef(workspace.contextKey);
+  currentContext.current = workspace.contextKey;
+  const removalOwner = useRef<{ context: string; token: number } | null>(null);
+  const removalToken = useRef(0);
+  if (removalOwner.current?.context !== workspace.contextKey) removalOwner.current = null;
+  const beginRemoval = () => {
+    if (removalOwner.current) return null;
+    const owner = { context: workspace.contextKey, token: ++removalToken.current };
+    removalOwner.current = owner;
+    setRemoving(true);
+    return owner;
+  };
+  const finishRemoval = (owner: { context: string; token: number }) => {
+    if (removalOwner.current !== owner) return;
+    removalOwner.current = null;
+    setRemoving(false);
+  };
+  useEffect(() => {
+    setSelected([]);
+    setRemoving(false);
+    setRemoval(null);
+    setBatchConfirm(false);
+    setBatchIssues([]);
+    setRemoveError(false);
+  }, [workspace.contextKey]);
   const canManageProjects = Boolean(onState && workspace.state.workspace_runner);
 
   const prepareRemoval = async (project: WorkspaceProject) => {
     if (!canManageProjects || removing || workspace.state.current_operation || !project.id) return;
-    setRemoving(true);
+    const owner = beginRemoval();
+    if (!owner) return;
+    const context = owner.context;
     setRemoveError(false);
     try {
-      setRemoval(await desktopApi.prepareProjectUnregister(project.id));
+      const observation = await desktopApi.prepareProjectUnregister(project.id);
+      if (currentContext.current === context) setRemoval(observation);
     } catch {
-      setRemoveError(true);
+      if (currentContext.current === context) setRemoveError(true);
     } finally {
-      setRemoving(false);
+      finishRemoval(owner);
     }
   };
 
   const unregister = async () => {
     if (!removal || !onState || removing || workspace.state.current_operation) return;
-    setRemoving(true);
+    const owner = beginRemoval();
+    if (!owner) return;
+    const context = owner.context;
     setRemoveError(false);
     try {
-      onState(await desktopApi.unregisterProject(removal));
-      workspace.removeProject(removal.project);
+      const state = await desktopApi.unregisterProject(removal);
+      if (currentContext.current === context) {
+        onState(state);
+        workspace.removeProject(removal.project);
+      }
     } catch {
-      setRemoveError(true);
+      if (currentContext.current === context) setRemoveError(true);
     } finally {
-      setRemoval(null);
-      setRemoving(false);
-      workspace.refresh();
+      if (currentContext.current === context) {
+        setRemoval(null);
+        workspace.refresh();
+      }
+      finishRemoval(owner);
     }
   };
 
@@ -89,7 +124,9 @@ export function ProjectsPanel({ onComputerSettings, onState }: { onComputerSetti
     if (!onState || removing || workspace.state.current_operation) return;
     const ids = selected.filter(id => workspace.projects.some(project => project.id === id && project.connected && projectRunnerId(project) === workspace.state.workspace_runner?.client_id));
     if (!ids.length) return;
-    setRemoving(true);
+    const owner = beginRemoval();
+    if (!owner) return;
+    const context = owner.context;
     setRemoveError(false);
     setBatchIssues([]);
     setBatchConfirm(false);
@@ -98,23 +135,29 @@ export function ProjectsPanel({ onComputerSettings, onState }: { onComputerSetti
       for (let offset = 0; offset < ids.length; offset += 16) {
         const chunk = ids.slice(offset, offset + 16);
         const observations = await desktopApi.prepareProjectsUnregister(chunk);
+        if (currentContext.current !== context) return;
         setBatchProgress(`${completed}/${ids.length}`);
         if (workspace.state.persistent_environment) {
           for (const observation of observations) {
             try {
-              onState(await desktopApi.unregisterProject(observation));
+              const next = await desktopApi.unregisterProject(observation);
+              if (currentContext.current !== context) return;
+              onState(next);
               workspace.removeProject(observation.project);
               setSelected(current => current.filter(id => id !== observation.project));
               completed++;
               setBatchProgress(`${completed}/${ids.length}`);
             } catch {
-              setRemoveError(true);
-              setBatchIssues([observation.project]);
+              if (currentContext.current === context) {
+                setRemoveError(true);
+                setBatchIssues([observation.project]);
+              }
               return;
             }
           }
         } else {
           const result = await desktopApi.unregisterProjects(observations);
+          if (currentContext.current !== context) return;
           onState(result.state);
           const succeeded = result.items.filter(item => item.success).map(item => item.project);
           for (const id of succeeded) workspace.removeProject(id);
@@ -130,11 +173,11 @@ export function ProjectsPanel({ onComputerSettings, onState }: { onComputerSetti
         }
       }
     } catch {
-      setRemoveError(true);
+      if (currentContext.current === context) setRemoveError(true);
     } finally {
       setBatchProgress("");
-      setRemoving(false);
-      workspace.refresh();
+      finishRemoval(owner);
+      if (currentContext.current === context) workspace.refresh();
     }
   };
 
