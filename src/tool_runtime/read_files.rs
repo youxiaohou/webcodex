@@ -869,10 +869,11 @@ pub(crate) fn apply_model_facing_output_budget(
 }
 
 fn final_model_result_len(output: &Value, projection: &ReadModelProjection) -> usize {
-    let mut projected = ToolResult::ok(output.clone());
-    add_actionable_read_continuations(projection, &mut projected);
-    super::result_projection::sparsify_complete_read_success("read_files", &mut projected);
-    serialized_json_len(&projected).unwrap_or(usize::MAX)
+    // The final hard cap needs the same exact model-visible projection as
+    // primary budgeting. Reuse its text-borrowing JSON sizer rather than
+    // repeatedly cloning multi-hundred-KiB file bodies on each backoff probe.
+    // Session/Job overlays remain in the canonical envelope and are counted.
+    projected_batch_serialized_len(output, projection)
 }
 
 fn mark_final_hard_cap_truncation(output: &mut Value, next_index: usize) {
@@ -936,10 +937,13 @@ pub(crate) fn enforce_final_model_facing_hard_cap(
     }
 
     loop {
-        let Some(items) = result.output.get("items").and_then(Value::as_array) else {
+        let Some(items) = result.output.get_mut("items").and_then(Value::as_array_mut) else {
             return;
         };
-        let Some(last) = items.last() else {
+        // Move the last source item out while probing candidate line counts.
+        // Previously every probe cloned the whole response (including all
+        // accepted file bodies and Session/Job metadata) before trimming it.
+        let Some(last) = items.pop() else {
             return;
         };
         let index = last["index"].as_u64().unwrap_or(0) as usize;
@@ -959,19 +963,24 @@ pub(crate) fn enforce_final_model_facing_hard_cap(
                 let mut best = None;
                 while low <= high {
                     let keep = low + (high - low) / 2;
-                    let Some(partial) = truncate_read_item(last, keep) else {
+                    let Some(partial) = truncate_read_item(&last, keep) else {
                         break;
                     };
-                    let mut candidate = result.output.clone();
-                    if let Some(candidate_items) =
-                        candidate.get_mut("items").and_then(Value::as_array_mut)
-                    {
-                        let last_index = candidate_items.len() - 1;
-                        candidate_items[last_index] = partial;
-                    }
-                    mark_final_hard_cap_truncation(&mut candidate, index);
-                    if final_model_result_len(&candidate, projection) <= MAX_SERIALIZED_OUTPUT_BYTES
-                    {
+                    result.output["items"]
+                        .as_array_mut()
+                        .expect("validated read batch")
+                        .push(partial);
+                    mark_final_hard_cap_truncation(&mut result.output, index);
+                    let fits = final_model_result_len(&result.output, projection)
+                        <= MAX_SERIALIZED_OUTPUT_BYTES;
+                    // Take only the candidate back out; the accepted prefix
+                    // and unrelated result metadata remain in the same object.
+                    let candidate = result.output["items"]
+                        .as_array_mut()
+                        .expect("validated read batch")
+                        .pop()
+                        .expect("just appended candidate");
+                    if fits {
                         best = Some(candidate);
                         low = keep.saturating_add(1);
                     } else {
@@ -979,22 +988,19 @@ pub(crate) fn enforce_final_model_facing_hard_cap(
                     }
                 }
                 if let Some(best) = best {
-                    result.output = best;
+                    result.output["items"]
+                        .as_array_mut()
+                        .expect("validated read batch")
+                        .push(best);
+                    mark_final_hard_cap_truncation(&mut result.output, index);
                     return;
                 }
             }
         }
 
-        let removed_index = {
-            let Some(items) = result.output.get_mut("items").and_then(Value::as_array_mut) else {
-                return;
-            };
-            items
-                .pop()
-                .and_then(|removed| removed["index"].as_u64())
-                .unwrap_or(index as u64) as usize
-        };
-        mark_final_hard_cap_truncation(&mut result.output, removed_index);
+        // The item could not fit even after trimming. It has already been
+        // removed; keep its exact original index as the continuation boundary.
+        mark_final_hard_cap_truncation(&mut result.output, index);
         if final_model_result_len(&result.output, projection) <= MAX_SERIALIZED_OUTPUT_BYTES {
             return;
         }
@@ -2525,6 +2531,330 @@ mod tests {
         assert!(complete_batch_model < complete_batch_canonical);
         assert!(budget_batch_model <= MAX_SERIALIZED_OUTPUT_BYTES);
         assert!(partial_plus_later_model <= DEFAULT_READ_FILES_RESULT_BYTES);
+    }
+
+    // Frozen previous final-cap size measurement. Independently checks the
+    // borrowed-text projection used by production against the full JSON clone.
+    fn legacy_final_model_result_len(output: &Value, projection: &ReadModelProjection) -> usize {
+        let mut projected = ToolResult::ok(output.clone());
+        add_actionable_read_continuations(projection, &mut projected);
+        super::super::result_projection::sparsify_complete_read_success(
+            "read_files",
+            &mut projected,
+        );
+        serialized_json_len(&projected).unwrap_or(usize::MAX)
+    }
+
+    // Frozen original implementation before in-place final hard-cap candidates.
+    fn legacy_enforce_final_model_facing_hard_cap(
+        result: &mut ToolResult,
+        projection: &ReadModelProjection,
+    ) {
+        if !result.success
+            || legacy_final_model_result_len(&result.output, projection)
+                <= MAX_SERIALIZED_OUTPUT_BYTES
+        {
+            return;
+        }
+        let Some(root) = result.output.as_object() else {
+            return;
+        };
+        if root.get("project").and_then(Value::as_str).is_none()
+            || root
+                .get("requested_count")
+                .and_then(Value::as_u64)
+                .is_none()
+            || root.get("items").and_then(Value::as_array).is_none()
+        {
+            return;
+        }
+
+        loop {
+            let Some(items) = result.output.get("items").and_then(Value::as_array) else {
+                return;
+            };
+            let Some(last) = items.last() else {
+                return;
+            };
+            let index = last["index"].as_u64().unwrap_or(0) as usize;
+
+            // Preserve as many whole source lines as possible from the last success
+            // item. Measuring the complete decorated ToolResult makes this exact and
+            // naturally accounts for recovery/handoff/attention bytes.
+            if last["success"].as_bool() == Some(true) {
+                let returned_lines = last
+                    .get("output")
+                    .and_then(|output| output.get("returned_lines"))
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0) as usize;
+                if returned_lines > 1 {
+                    let mut low = 1usize;
+                    let mut high = returned_lines - 1;
+                    let mut best = None;
+                    while low <= high {
+                        let keep = low + (high - low) / 2;
+                        let Some(partial) = truncate_read_item(last, keep) else {
+                            break;
+                        };
+                        let mut candidate = result.output.clone();
+                        if let Some(candidate_items) =
+                            candidate.get_mut("items").and_then(Value::as_array_mut)
+                        {
+                            let last_index = candidate_items.len() - 1;
+                            candidate_items[last_index] = partial;
+                        }
+                        mark_final_hard_cap_truncation(&mut candidate, index);
+                        if legacy_final_model_result_len(&candidate, projection)
+                            <= MAX_SERIALIZED_OUTPUT_BYTES
+                        {
+                            best = Some(candidate);
+                            low = keep.saturating_add(1);
+                        } else {
+                            high = keep.saturating_sub(1);
+                        }
+                    }
+                    if let Some(best) = best {
+                        result.output = best;
+                        return;
+                    }
+                }
+            }
+
+            let removed_index = {
+                let Some(items) = result.output.get_mut("items").and_then(Value::as_array_mut)
+                else {
+                    return;
+                };
+                items
+                    .pop()
+                    .and_then(|removed| removed["index"].as_u64())
+                    .unwrap_or(index as u64) as usize
+            };
+            mark_final_hard_cap_truncation(&mut result.output, removed_index);
+            if legacy_final_model_result_len(&result.output, projection)
+                <= MAX_SERIALIZED_OUTPUT_BYTES
+            {
+                return;
+            }
+        }
+    }
+
+    #[test]
+    fn final_hard_cap_size_matches_frozen_full_clone_on_all_projection_shapes() {
+        let utf = (0..850)
+            .map(|line| format!("line-{line:04} {} quote=\" slash=\\", "界🦀".repeat(25)))
+            .collect::<Vec<_>>();
+        let mut failure = ranged_item(1, 1, &["private failure".to_string()]);
+        failure["success"] = json!(false);
+        failure["error"] = json!("error");
+        let examples = [
+            batch_output(
+                "agent:oe:demo",
+                1,
+                vec![default_complete_item(0, &["abc".to_string()])],
+                false,
+                None,
+                None,
+            ),
+            batch_output(
+                "agent:oe:demo",
+                2,
+                vec![ranged_item(0, 11, &utf), failure],
+                true,
+                Some(0),
+                Some("hard_result_cap"),
+            ),
+            batch_output(
+                "agent:oe:demo",
+                1,
+                vec![default_complete_item(0, &["a".repeat(488 * 1024)])],
+                false,
+                None,
+                None,
+            ),
+            json!({"unexpected": "中\\n🌍", "items": "malformed"}),
+            json!({"items": [], "output_truncated": true, "next_index": 0,
+                   "unknown_metadata": {"error": "unknown"}}),
+        ];
+        for mut output in examples {
+            output["session_hint"] = json!({"work": "unfinished", "notes": "界🦀"});
+            output["job_attention"] = json!({"items": [{"count": 3, "status": "ready"}]});
+            output["extra"] = json!({"unicode": "🥟", "slash": "\\\\", "tab": "\\t"});
+            let snapshot = output.clone();
+            for projection in [
+                batch_projection(1, None),
+                batch_projection(2, Some(MAX_SERIALIZED_OUTPUT_BYTES)),
+                ReadModelProjection::None,
+            ] {
+                assert_eq!(
+                    final_model_result_len(&output, &projection),
+                    legacy_final_model_result_len(&output, &projection),
+                    "final 512 KiB cap sizer must equal frozen canonical serialization"
+                );
+                assert_eq!(output, snapshot, "sizing must not mutate result");
+            }
+        }
+    }
+
+    #[test]
+    fn final_hard_cap_in_place_matches_legacy_across_partial_drops_and_metadata() {
+        let utf_lines = (0..900)
+            .map(|line| format!("第{line:04}行-{}", "界".repeat(42)))
+            .collect::<Vec<_>>();
+        let ascii_lines = (0..1100)
+            .map(|line| format!("line={line} {} \" \\", "x".repeat(150)))
+            .collect::<Vec<_>>();
+        let mut existing_partial = ranged_item(1, 11, &ascii_lines);
+        existing_partial["output"]["budget_next_limit"] = json!(89);
+        existing_partial["output"]["budget_truncated"] = json!(true);
+        existing_partial["output"]["has_more"] = json!(true);
+        existing_partial["output"]["next_start_line"] = json!(1111);
+        existing_partial["output"]["total_lines"] = json!(1199);
+
+        let mut failed = ranged_item(0, 1, &["bad read".into()]);
+        failed["success"] = json!(false);
+        failed["error"] = json!("private_error_marker");
+
+        let cases = [
+            (
+                vec![default_complete_item(0, &["short".to_string()])],
+                0usize,
+            ),
+            (vec![ranged_item(0, 11, &utf_lines)], 455 * 1024),
+            (
+                vec![
+                    default_complete_item(0, &["p".repeat(340 * 1024)]),
+                    existing_partial.clone(),
+                ],
+                92 * 1024,
+            ),
+            (
+                vec![
+                    default_complete_item(0, &["p".repeat(90 * 1024)]),
+                    failed.clone(),
+                    ranged_item(2, 11, &utf_lines),
+                ],
+                390 * 1024,
+            ),
+            (
+                (0..8)
+                    .map(|index| default_complete_item(index, &["X".repeat(85 * 1024)]))
+                    .collect(),
+                0,
+            ),
+            (
+                vec![default_complete_item(0, &["Y".repeat(510 * 1024)])],
+                25 * 1024,
+            ),
+            (vec![failed], 550 * 1024),
+        ];
+
+        let mut actual_partials = 0usize;
+        let mut actual_drops = 0usize;
+        for (case, (items, metadata_bytes)) in cases.into_iter().enumerate() {
+            let count = items.len();
+            let projection = batch_projection(count, Some(MAX_SERIALIZED_OUTPUT_BYTES));
+            let mut base = ToolResult::ok(batch_output(
+                "agent:oe:demo",
+                count,
+                items,
+                false,
+                None,
+                None,
+            ));
+            base.output["session_hint"] = json!({
+                "purpose": "keep",
+                "todo": ["question", "context", "open"],
+                "weird": "新しい 🦀 \n \t \" \\"
+            });
+            base.output["job_attention"] = json!({
+                "items": [{"state": "terminal", "outcome": "passed"}]
+            });
+            base.output["unknown_extended_metadata"] = json!({
+                "padding": "m".repeat(metadata_bytes)
+            });
+            let input = ToolResult::ok(base.output.clone());
+            let mut previous = ToolResult::ok(base.output.clone());
+            legacy_enforce_final_model_facing_hard_cap(&mut previous, &projection);
+            enforce_final_model_facing_hard_cap(&mut base, &projection);
+            assert_eq!(
+                serde_json::to_value(&base).unwrap(),
+                serde_json::to_value(&previous).unwrap(),
+                "case={case}: canonical ToolResult differs from legacy"
+            );
+            let before_items = input.output["items"].as_array().unwrap();
+            let after_items = base.output["items"].as_array().unwrap();
+            actual_drops += usize::from(after_items.len() < before_items.len());
+            if after_items.iter().any(|item| {
+                item["output"]["budget_truncated"] == true
+                    && before_items.iter().any(|prior| {
+                        prior["index"] == item["index"]
+                            && prior["output"]["returned_lines"] != item["output"]["returned_lines"]
+                    })
+            }) {
+                actual_partials += 1;
+            }
+            assert!(base.output["session_hint"].is_object());
+            assert_eq!(base.output["job_attention"], input.output["job_attention"]);
+
+            let mut model = ToolResult::ok(base.output.clone());
+            let mut old_model = previous;
+            add_actionable_read_continuations(&projection, &mut model);
+            add_actionable_read_continuations(&projection, &mut old_model);
+            super::super::result_projection::sparsify_complete_read_success(
+                "read_files",
+                &mut model,
+            );
+            super::super::result_projection::sparsify_complete_read_success(
+                "read_files",
+                &mut old_model,
+            );
+            assert_eq!(
+                serde_json::to_value(&model).unwrap(),
+                serde_json::to_value(&old_model).unwrap(),
+                "case={case}: projected parser-visible result/continuations differ"
+            );
+            if let Some(next) = model.output.get("suggested_call") {
+                assert_eq!(next["tool"], "read_files");
+                ToolCall::from_tool_name("read_files", next["arguments"].clone())
+                    .expect("suggested continuation must parse");
+            }
+        }
+        assert!(
+            actual_partials > 0,
+            "some fixture must fit a partial final read"
+        );
+        assert!(
+            actual_drops > 0,
+            "some fixture must drop an entire final item"
+        );
+    }
+
+    #[test]
+    fn final_hard_cap_stops_on_missing_metadata_and_failure_without_mutation() {
+        for mut result in [
+            ToolResult::ok(
+                json!({"items": [], "requested_count": 1, "other": "x".repeat(530 * 1024)}),
+            ),
+            ToolResult::ok(
+                json!({"project": "demo", "items": [], "other": "x".repeat(530 * 1024)}),
+            ),
+            ToolResult::ok(
+                json!({"project": "demo", "requested_count": 1, "items": "not-array",
+                                  "other": "x".repeat(530 * 1024)}),
+            ),
+            ToolResult::err_with_output(
+                "failed",
+                json!({
+                    "project": "demo", "requested_count": 1,
+                    "items": [], "other": "x".repeat(530 * 1024)
+                }),
+            ),
+        ] {
+            let before = serde_json::to_value(&result).unwrap();
+            enforce_final_model_facing_hard_cap(&mut result, &batch_projection(1, None));
+            assert_eq!(serde_json::to_value(&result).unwrap(), before);
+        }
     }
 
     #[test]
