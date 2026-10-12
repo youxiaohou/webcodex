@@ -21,6 +21,7 @@ use serde_json::json;
 mod communication;
 mod goals;
 mod overview;
+mod overview_job_scan;
 mod projects;
 mod session_collaboration;
 mod sessions;
