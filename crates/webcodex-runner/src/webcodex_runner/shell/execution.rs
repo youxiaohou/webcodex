@@ -2,6 +2,15 @@
 
 use super::*;
 
+/// Keep the short-lived bounded-search hot path responsive without increasing
+/// polling work for ordinary commands or long-running searches.
+pub(super) fn child_poll_interval(bounded_search: bool, elapsed: Duration) -> Duration {
+    if bounded_search && elapsed < Duration::from_millis(100) {
+        Duration::from_millis(10)
+    } else {
+        Duration::from_millis(50)
+    }
+}
 #[allow(clippy::too_many_arguments)]
 pub(super) fn execute_configured_command(
     policy: &RunnerPolicy,
@@ -115,6 +124,7 @@ pub(super) fn execute_configured_command_with_prefix(
         },
         None => None,
     };
+    let search_poll_start = Instant::now();
     let mut output_bounded = false;
     loop {
         if let Err(error) = poll_stdin_writer(&mut stdin_writer) {
@@ -205,7 +215,10 @@ pub(super) fn execute_configured_command_with_prefix(
                         }),
                     };
                 }
-                std::thread::sleep(Duration::from_millis(50));
+                std::thread::sleep(child_poll_interval(
+                    prefix.is_some(),
+                    search_poll_start.elapsed(),
+                ));
             }
             Err(e) => {
                 let cleanup = terminate_and_collect_pipes(child, drains).err();
