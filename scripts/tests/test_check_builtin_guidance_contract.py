@@ -53,12 +53,14 @@ class GuidanceContractPreflightTests(unittest.TestCase):
     def test_reject_new_canonical_literal_assertion_without_guidance(self):
         original = '        "binary files",'
         self.assertEqual(self.tests.count(original), 1)
+        missing = "guidance preflight missing-literal sentinel"
+        self.assertNotIn(missing, self.source)
         changed = self.tests.replace(
             original,
-            original + '\n        "never rename or transform binaries via text edits",',
+            original + f'\n        "{missing}",',
             1,
         )
-        with self.assertRaisesRegex(GuidancePreflightError, "never rename or transform"):
+        with self.assertRaisesRegex(GuidancePreflightError, missing):
             self.check(tests=changed)
 
     def test_reject_extra_host_item(self):
@@ -84,9 +86,13 @@ class GuidanceContractPreflightTests(unittest.TestCase):
             self.check(source=changed)
 
     def test_reject_unknown_rust_literal_syntax(self):
-        changed = self.source.replace(
-            '"Use artifact import/export',
-            'r#"Use artifact import/export',
+        anchor = "pub(super) static DIRECT: GuidanceContributor ="
+        self.assertEqual(self.source.count(anchor), 1)
+        head, direct_and_rest = self.source.split(anchor, 1)
+        # Corrupt the literal layout rather than an incidental guidance sentence.
+        changed = head + anchor + direct_and_rest.replace(
+            'items: &[\n        "',
+            'items: &[\n        r#"',
             1,
         )
         self.assertNotEqual(changed, self.source)
