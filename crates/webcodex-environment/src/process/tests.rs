@@ -49,22 +49,31 @@ fn running(pid: u32) -> bool {
 #[test]
 fn exited_leader_never_leaves_pipe_holding_descendants_or_reader_threads() {
     let tmp = tempfile::tempdir().unwrap();
-    for script in [
-        "sleep 30 & echo $! > \"$PID_FILE\"; exit 0",
-        "sleep 30 >&- 2>&- & echo $! > \"$PID_FILE\"; exit 0",
-        "sleep 30 & echo $! > \"$PID_FILE\"; while :; do printf 123456789; done",
-    ] {
-        let path = tmp.path().join("pid");
+    for (index, script) in [
+        "sleep 30 & printf '%s\n' \"$!\" > \"$PID_FILE.tmp\"; mv \"$PID_FILE.tmp\" \"$PID_FILE\"; exit 0",
+        "sleep 30 >&- 2>&- & printf '%s\n' \"$!\" > \"$PID_FILE.tmp\"; mv \"$PID_FILE.tmp\" \"$PID_FILE\"; exit 0",
+        "sleep 30 & printf '%s\n' \"$!\" > \"$PID_FILE.tmp\"; mv \"$PID_FILE.tmp\" \"$PID_FILE\"; while :; do printf 123456789; done",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        // Independent, atomically published evidence: a later script must not
+        // truncate or accidentally reuse an earlier descendant's PID.
+        let path = tmp.path().join(format!("pid-{index}"));
         let started = Instant::now();
+        // Startup under parallel CI is not what this test measures. The 50ms
+        // deadline contract is independently covered above; this test checks
+        // that every launched descendant is gone when capture returns.
         let result = Command::new("/bin/sh")
             .args(["-c", script])
             .env("PID_FILE", &path)
-            .output_with_limits(Duration::from_millis(200), 1024);
-        let pid: u32 = std::fs::read_to_string(&path)
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
+            .output_with_limits(Duration::from_secs(2), 1024);
+        let pid_text = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+            panic!("descendant PID fixture {index} was not published: {error}; capture={result:?}")
+        });
+        let pid: u32 = pid_text.trim().parse().unwrap_or_else(|error| {
+            panic!("invalid descendant PID in fixture {index}: {error}; capture={result:?}")
+        });
         let deadline = Instant::now() + Duration::from_secs(2);
         while running(pid) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(5));
