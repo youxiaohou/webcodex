@@ -1045,6 +1045,36 @@ impl SessionStore {
     /// advance events_observed; collaboration mutations advance
     /// message_observation_revision. Never serialized or accepted from a caller.
     pub fn handoff_revision(&self, session_id: &str) -> Option<(u64, u64)> {
+        self.retained_revisions(session_id)
+    }
+
+    /// Cold JSON is canonical and immutable after admission, so scalar
+    /// revisions need not materialize its entire (up to 2,000-event) body.
+    /// Keep the same LRU read touch as with_record_for_query. If an internal
+    /// repair/test replaced raw bytes, fall through to the original checked
+    /// materialization path rather than returning stale revision metadata.
+    pub(super) fn retained_revisions(&self, session_id: &str) -> Option<(u64, u64)> {
+        {
+            let mut inner = self.inner.lock().expect("session store mutex poisoned");
+            inner.touch(session_id);
+            match inner.sessions.get(session_id)? {
+                StoredSession::Hot(record) => {
+                    return Some((record.events_observed, record.message_observation_revision));
+                }
+                StoredSession::Cold(cold)
+                    if std::ptr::eq(
+                        std::sync::Weak::as_ptr(&cold.revision_raw),
+                        Arc::as_ptr(&cold.raw),
+                    ) =>
+                {
+                    return Some((
+                        cold.retained_events_observed,
+                        cold.retained_message_revision,
+                    ));
+                }
+                StoredSession::Cold(_) => {}
+            }
+        }
         self.with_record_for_query(session_id, |record, _| {
             (record.events_observed, record.message_observation_revision)
         })
