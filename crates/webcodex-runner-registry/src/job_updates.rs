@@ -2120,6 +2120,7 @@ impl RunnerRegistry {
     pub async fn runtime_job_aggregate_for_auth(
         &self,
         auth: Option<&crate::RunnerAccess>,
+        client_id: Option<&str>,
     ) -> RuntimeJobAggregateSnapshot {
         #[cfg(any(test, feature = "root-test-support"))]
         self.full_job_history_scan_count
@@ -2133,6 +2134,7 @@ impl RunnerRegistry {
         for job in inner.jobs_by_id.values().filter(|job| {
             job.visibility == ShellJobVisibility::Public
                 && shell_job_visible_to_auth(auth, &inner, job)
+                && client_id.is_none_or(|id| job.client_id == id)
         }) {
             let status = job.public_status();
             let lifecycle =

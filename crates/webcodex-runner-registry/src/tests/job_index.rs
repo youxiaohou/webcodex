@@ -314,9 +314,18 @@ async fn runtime_status_aggregate_matches_full_visible_job_projection_without_lo
     ] {
         let access = auth.as_ref();
         let old = registry.list_all_jobs_for_auth(access).await;
-        let expected = expected_runtime_job_aggregate(&old);
-        let actual = registry.runtime_job_aggregate_for_auth(access).await;
-        assert_eq!(actual, expected);
+        for client_id in [None, Some("oe"), Some("missing")] {
+            let selected = old
+                .iter()
+                .filter(|job| client_id.is_none_or(|id| job.client_id == id))
+                .cloned()
+                .collect::<Vec<_>>();
+            let expected = expected_runtime_job_aggregate(&selected);
+            let actual = registry
+                .runtime_job_aggregate_for_auth(access, client_id)
+                .await;
+            assert_eq!(actual, expected, "client_id={client_id:?}");
+        }
     }
 }
 
@@ -329,7 +338,9 @@ async fn runtime_status_aggregate_cost_comparison() {
     let reference = registry.list_all_jobs_for_auth(Some(&auth)).await;
     let expected = expected_runtime_job_aggregate(&reference);
     assert_eq!(
-        registry.runtime_job_aggregate_for_auth(Some(&auth)).await,
+        registry
+            .runtime_job_aggregate_for_auth(Some(&auth), None)
+            .await,
         expected
     );
     let mut full_ns = 0_u128;
@@ -342,7 +353,11 @@ async fn runtime_status_aggregate_cost_comparison() {
             full_ns += t.elapsed().as_nanos();
         }
         let t = Instant::now();
-        std::hint::black_box(registry.runtime_job_aggregate_for_auth(Some(&auth)).await);
+        std::hint::black_box(
+            registry
+                .runtime_job_aggregate_for_auth(Some(&auth), None)
+                .await,
+        );
         aggregate_ns += t.elapsed().as_nanos();
         if index % 2 != 0 {
             let t = Instant::now();

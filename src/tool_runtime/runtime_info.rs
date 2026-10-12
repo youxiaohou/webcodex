@@ -387,7 +387,7 @@ impl ToolRuntime {
         if sparse {
             let summary = self
                 .runner_registry
-                .runtime_job_aggregate_for_auth(access.as_ref())
+                .runtime_job_aggregate_for_auth(access.as_ref(), None)
                 .await;
             return ToolResult::ok(self.sparse_runtime_status(&clients, &summary, None));
         }
@@ -709,7 +709,7 @@ impl ToolRuntime {
         if sparse {
             let summary = self
                 .runner_registry
-                .runtime_job_aggregate_for_auth(access.as_ref())
+                .runtime_job_aggregate_for_auth(access.as_ref(), Some(&client.client_id))
                 .await;
             return ToolResult::ok(self.sparse_runtime_status(clients, &summary, Some(client)));
         }
