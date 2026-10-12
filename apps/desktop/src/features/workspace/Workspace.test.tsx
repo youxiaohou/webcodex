@@ -462,7 +462,6 @@ describe("product workspace task flows", () => {
     await screen.findByRole("button", { name: "Select / deselect visible" });
     fireEvent.click(screen.getByRole("button", { name: "Select / deselect visible" }));
     fireEvent.click(screen.getByRole("button", { name: "Remove selected (2)" }));
-    fireEvent.click(within(screen.getByRole("dialog", { name: "Remove selected (2)" })).getByRole("button", { name: "Remove selected (2)" }));
     expect(api.prepareProjectsUnregister).toHaveBeenCalledTimes(1);
     const next = { ...state, workspace_runner: { ...state.workspace_runner!, config_path: "other.toml" } };
     rerender(wrap(<ProjectsPanel onState={onState} />, next));
@@ -475,6 +474,68 @@ describe("product workspace task flows", () => {
     await act(async () => resolveSingle({ target: next.workspace_runner, project: beta.id, path: beta.path, expected_revision: "sha256:" + "a".repeat(64) }));
     expect(await screen.findByRole("dialog", { name: "Remove project" })).toBeInTheDocument();
     expect(onState).not.toHaveBeenCalled();
+  });
+
+  it("binds batch confirmation to the displayed registration paths and revisions", async () => {
+    const observation = { target: state.workspace_runner, project: beta.id, path: beta.path, expected_revision: "sha256:" + "a".repeat(64) };
+    const replacement = { ...observation, path: "C:\\replacement", expected_revision: "sha256:" + "b".repeat(64) };
+    api.prepareProjectsUnregister.mockResolvedValue([observation]);
+    api.unregisterProjects.mockResolvedValue({ state, items: [{ project: beta.id, success: false, status: "revision_conflict" }] });
+    render(wrap(<ProjectsPanel onState={vi.fn()} />));
+    await screen.findByRole("checkbox", { name: "Select beta" });
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select beta" }));
+    fireEvent.click(screen.getByRole("button", { name: "Remove selected (1)" }));
+    const dialog = await screen.findByRole("dialog", { name: "Remove selected (1)" });
+    expect(api.prepareProjectsUnregister).toHaveBeenCalledExactlyOnceWith([beta.id]);
+    expect(dialog).toHaveTextContent(beta.path);
+    // A registration replacement while the dialog is open must not refresh
+    // the revision underneath the user's already-reviewed confirmation.
+    api.prepareProjectsUnregister.mockResolvedValue([replacement]);
+    fireEvent.click(within(dialog).getByRole("button", { name: "Remove selected (1)" }));
+    await waitFor(() => expect(api.unregisterProjects).toHaveBeenCalledExactlyOnceWith([observation]));
+    expect(api.prepareProjectsUnregister).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("row", { name: "beta" })).toBeInTheDocument();
+  });
+
+  it("discards stale removal work after returning to the same workspace", async () => {
+    let resolveObservation!: (value: unknown) => void;
+    api.prepareProjectUnregister.mockImplementation(() => new Promise(resolve => { resolveObservation = resolve; }));
+    const onState = vi.fn();
+    const { rerender } = render(wrap(<ProjectsPanel onState={onState} />));
+    await screen.findByRole("button", { name: "Remove project beta" });
+    fireEvent.click(screen.getByRole("button", { name: "Remove project beta" }));
+    const next = { ...state, workspace_runner: { ...state.workspace_runner!, config_path: "other.toml" } };
+    rerender(wrap(<ProjectsPanel onState={onState} />, next));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Remove project beta" })).toBeEnabled());
+    rerender(wrap(<ProjectsPanel onState={onState} />));
+    await screen.findByRole("button", { name: "Remove project beta" });
+    await act(async () => resolveObservation({ target: state.workspace_runner, project: beta.id, path: beta.path, expected_revision: "sha256:" + "a".repeat(64) }));
+    expect(screen.queryByRole("dialog", { name: "Remove project" })).not.toBeInTheDocument();
+    expect(api.unregisterProject).not.toHaveBeenCalled();
+    expect(onState).not.toHaveBeenCalled();
+  });
+
+  it("prepares and executes a large selection in bounded chunks without replacing confirmed observations", async () => {
+    const projects = Array.from({ length: 17 }, (_, index) => ({ ...beta, id: `agent:mini:project-${index}`, name: `project-${index}`, path: `/projects/${index}` }));
+    const normal = native.invoke.getMockImplementation()!;
+    native.invoke.mockImplementation((command, value) => value.request.kind === "projects"
+      ? Promise.resolve({ projects, total: projects.length, truncated: false })
+      : normal(command, value));
+    const observation = (project: string) => ({ target: state.workspace_runner, project, path: projects.find(row => row.id === project)!.path, expected_revision: "sha256:" + "a".repeat(64) });
+    api.prepareProjectsUnregister.mockImplementation(async (ids: string[]) => ids.map(observation));
+    api.unregisterProjects.mockImplementation(async (items: { project: string }[]) => ({ state, items: items.map(item => ({ project: item.project, success: true, status: "unregistered" })) }));
+    render(wrap(<ProjectsPanel onState={vi.fn()} />));
+    await screen.findByRole("checkbox", { name: "Select project-16" });
+    fireEvent.click(screen.getByRole("button", { name: "Select / deselect visible" }));
+    fireEvent.click(screen.getByRole("button", { name: "Remove selected (17)" }));
+    const dialog = await screen.findByRole("dialog", { name: "Remove selected (17)" });
+    expect(api.prepareProjectsUnregister.mock.calls.map(([ids]) => ids.length)).toEqual([16, 1]);
+    expect(api.unregisterProjects).not.toHaveBeenCalled();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Remove selected (17)" }));
+    await waitFor(() => expect(api.unregisterProjects).toHaveBeenCalledTimes(2));
+    expect(api.unregisterProjects.mock.calls.map(([items]) => items.length)).toEqual([16, 1]);
+    expect(api.unregisterProjects.mock.calls.flatMap(([items]) => items)).toEqual(projects.map(row => observation(row.id)));
+    expect(api.prepareProjectsUnregister).toHaveBeenCalledTimes(2);
   });
 
   it("selects visible projects and stops a batch after the first unconfirmed removal", async () => {

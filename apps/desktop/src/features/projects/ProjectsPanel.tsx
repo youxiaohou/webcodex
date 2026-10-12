@@ -51,14 +51,13 @@ export function ProjectsPanel({ onComputerSettings, onState }: { onComputerSetti
   const [removing, setRemoving] = useState(false);
   const [removeError, setRemoveError] = useState(false);
   const [selected, setSelected] = useState<string[]>([]);
-  const [batchConfirm, setBatchConfirm] = useState(false);
+  const [batchConfirm, setBatchConfirm] = useState<UnregisterObservation[] | null>(null);
   const [batchProgress, setBatchProgress] = useState("");
   const [batchIssues, setBatchIssues] = useState<string[]>([]);
-  const currentContext = useRef(workspace.contextKey);
-  currentContext.current = workspace.contextKey;
   const removalOwner = useRef<{ context: string; token: number } | null>(null);
   const removalToken = useRef(0);
   if (removalOwner.current?.context !== workspace.contextKey) removalOwner.current = null;
+  useEffect(() => () => { removalOwner.current = null; }, []);
   const beginRemoval = () => {
     if (removalOwner.current) return null;
     const owner = { context: workspace.contextKey, token: ++removalToken.current };
@@ -73,9 +72,10 @@ export function ProjectsPanel({ onComputerSettings, onState }: { onComputerSetti
   };
   useEffect(() => {
     setSelected([]);
+    setBatchProgress("");
     setRemoving(false);
     setRemoval(null);
-    setBatchConfirm(false);
+    setBatchConfirm(null);
     setBatchIssues([]);
     setRemoveError(false);
   }, [workspace.contextKey]);
@@ -85,13 +85,12 @@ export function ProjectsPanel({ onComputerSettings, onState }: { onComputerSetti
     if (!canManageProjects || removing || workspace.state.current_operation || !project.id) return;
     const owner = beginRemoval();
     if (!owner) return;
-    const context = owner.context;
     setRemoveError(false);
     try {
       const observation = await desktopApi.prepareProjectUnregister(project.id);
-      if (currentContext.current === context) setRemoval(observation);
+      if (removalOwner.current === owner) setRemoval(observation);
     } catch {
-      if (currentContext.current === context) setRemoveError(true);
+      if (removalOwner.current === owner) setRemoveError(true);
     } finally {
       finishRemoval(owner);
     }
@@ -101,18 +100,17 @@ export function ProjectsPanel({ onComputerSettings, onState }: { onComputerSetti
     if (!removal || !onState || removing || workspace.state.current_operation) return;
     const owner = beginRemoval();
     if (!owner) return;
-    const context = owner.context;
     setRemoveError(false);
     try {
       const state = await desktopApi.unregisterProject(removal);
-      if (currentContext.current === context) {
+      if (removalOwner.current === owner) {
         onState(state);
         workspace.removeProject(removal.project);
       }
     } catch {
-      if (currentContext.current === context) setRemoveError(true);
+      if (removalOwner.current === owner) setRemoveError(true);
     } finally {
-      if (currentContext.current === context) {
+      if (removalOwner.current === owner) {
         setRemoval(null);
         workspace.refresh();
       }
@@ -120,35 +118,62 @@ export function ProjectsPanel({ onComputerSettings, onState }: { onComputerSetti
     }
   };
 
-  const unregisterSelected = async () => {
+  const prepareSelectedRemoval = async () => {
     if (!onState || removing || workspace.state.current_operation) return;
     const ids = selected.filter(id => workspace.projects.some(project => project.id === id && project.connected && projectRunnerId(project) === workspace.state.workspace_runner?.client_id));
     if (!ids.length) return;
     const owner = beginRemoval();
     if (!owner) return;
-    const context = owner.context;
     setRemoveError(false);
     setBatchIssues([]);
-    setBatchConfirm(false);
+    setBatchConfirm(null);
     try {
-      let completed = 0;
+      const observations: UnregisterObservation[] = [];
       for (let offset = 0; offset < ids.length; offset += 16) {
         const chunk = ids.slice(offset, offset + 16);
-        const observations = await desktopApi.prepareProjectsUnregister(chunk);
-        if (currentContext.current !== context) return;
-        setBatchProgress(`${completed}/${ids.length}`);
+        const prepared = await desktopApi.prepareProjectsUnregister(chunk);
+        if (removalOwner.current !== owner) return;
+        if (prepared.length !== chunk.length || prepared.some((item, index) => item.project !== chunk[index])) {
+          throw new Error("Unregister observations did not match the selected projects");
+        }
+        observations.push(...prepared);
+      }
+      // The confirmation owns these exact paths and revisions. Never replace
+      // them with a fresh inventory after the user has confirmed.
+      setBatchConfirm(observations);
+    } catch {
+      if (removalOwner.current === owner) setRemoveError(true);
+    } finally {
+      finishRemoval(owner);
+    }
+  };
+
+  const unregisterSelected = async () => {
+    if (!onState || !batchConfirm?.length || removing || workspace.state.current_operation) return;
+    const observations = batchConfirm;
+    const owner = beginRemoval();
+    if (!owner) return;
+    setRemoveError(false);
+    setBatchIssues([]);
+    setBatchConfirm(null);
+    try {
+      let completed = 0;
+      for (let offset = 0; offset < observations.length; offset += 16) {
+        if (removalOwner.current !== owner) return;
+        const chunk = observations.slice(offset, offset + 16);
+        setBatchProgress(`${completed}/${observations.length}`);
         if (workspace.state.persistent_environment) {
-          for (const observation of observations) {
+          for (const observation of chunk) {
             try {
               const next = await desktopApi.unregisterProject(observation);
-              if (currentContext.current !== context) return;
+              if (removalOwner.current !== owner) return;
               onState(next);
               workspace.removeProject(observation.project);
               setSelected(current => current.filter(id => id !== observation.project));
               completed++;
-              setBatchProgress(`${completed}/${ids.length}`);
+              setBatchProgress(`${completed}/${observations.length}`);
             } catch {
-              if (currentContext.current === context) {
+              if (removalOwner.current === owner) {
                 setRemoveError(true);
                 setBatchIssues([observation.project]);
               }
@@ -156,28 +181,30 @@ export function ProjectsPanel({ onComputerSettings, onState }: { onComputerSetti
             }
           }
         } else {
-          const result = await desktopApi.unregisterProjects(observations);
-          if (currentContext.current !== context) return;
+          const result = await desktopApi.unregisterProjects(chunk);
+          if (removalOwner.current !== owner) return;
           onState(result.state);
           const succeeded = result.items.filter(item => item.success).map(item => item.project);
           for (const id of succeeded) workspace.removeProject(id);
           setSelected(current => current.filter(id => !succeeded.includes(id)));
           completed += succeeded.length;
-          setBatchProgress(`${completed}/${ids.length}`);
+          setBatchProgress(`${completed}/${observations.length}`);
           const issues = result.items.filter(item => !item.success).map(item => `${item.project}: ${item.status}`);
           if (issues.length || result.items.length !== chunk.length) {
-            setBatchIssues(issues.length ? issues : chunk);
+            setBatchIssues(issues.length ? issues : chunk.map(item => item.project));
             setRemoveError(true);
             return;
           }
         }
       }
     } catch {
-      if (currentContext.current === context) setRemoveError(true);
+      if (removalOwner.current === owner) setRemoveError(true);
     } finally {
-      setBatchProgress("");
+      if (removalOwner.current === owner) {
+        setBatchProgress("");
+        workspace.refresh();
+      }
       finishRemoval(owner);
-      if (currentContext.current === context) workspace.refresh();
     }
   };
 
@@ -207,18 +234,18 @@ export function ProjectsPanel({ onComputerSettings, onState }: { onComputerSetti
         const visible = rows.filter(project => project.id && project.connected && projectRunnerId(project) === workspace.state.workspace_runner?.client_id).map(project => project.id);
         setSelected(current => visible.every(id => current.includes(id)) ? current.filter(id => !visible.includes(id)) : Array.from(new Set([...current, ...visible])));
       }}>{p("selectVisibleProjects")}</Button>
-      <Button color="red" disabled={removing || !selected.some(id => workspace.projects.some(project => project.id === id))} onClick={() => setBatchConfirm(true)}>{p("removeSelectedProjects").replace("{count}", String(selected.length))}</Button>
+      <Button color="red" disabled={removing || !selected.some(id => workspace.projects.some(project => project.id === id))} onClick={() => void prepareSelectedRemoval()}>{p("removeSelectedProjects").replace("{count}", String(selected.length))}</Button>
       {batchProgress && <span role="status">{batchProgress}</span>}
     </div>}
     <ProjectRows projects={rows} onUnregister={canManageProjects ? prepareRemoval : undefined} onSelect={canManageProjects ? (id, checked) => setSelected(current => checked ? Array.from(new Set([...current, id])) : current.filter(value => value !== id)) : undefined} selected={selected} busy={removing || Boolean(workspace.state.current_operation)} />
     {removeError && <p role="alert" className="workspace-notice">{p("unregisterError")}</p>}
     {batchIssues.length > 0 && <ul aria-label={p("failedProjects")} className="workspace-notice">{batchIssues.map(issue => <li key={issue}>{issue}</li>)}</ul>}
-    {batchConfirm && <WorkspaceDialog title={p("removeSelectedProjects").replace("{count}", String(selected.length))} onClose={() => setBatchConfirm(false)} busy={removing}>
+    {batchConfirm && <WorkspaceDialog title={p("removeSelectedProjects").replace("{count}", String(batchConfirm.length))} onClose={() => setBatchConfirm(null)} busy={removing}>
       <p>{p("unregisterDescription")}</p>
-      <p>{selected.map(id => projectName(workspace.projects.find(project => project.id === id) || { id, connected: false })).join(", ")}</p>
+      <ul>{batchConfirm.map(observation => <li key={observation.project}><strong>{projectName({ id: observation.project, path: observation.path })}</strong> <code>{displayProjectPath(observation.path)}</code></li>)}</ul>
       <div className="shell-actions">
-        <Button variant="default" onClick={() => setBatchConfirm(false)}>{p("cancel")}</Button>
-        <Button color="red" onClick={() => void unregisterSelected()}>{p("removeSelectedProjects").replace("{count}", String(selected.length))}</Button>
+        <Button variant="default" onClick={() => setBatchConfirm(null)} disabled={removing}>{p("cancel")}</Button>
+        <Button color="red" onClick={() => void unregisterSelected()} disabled={removing || Boolean(workspace.state.current_operation)}>{p("removeSelectedProjects").replace("{count}", String(batchConfirm.length))}</Button>
       </div>
     </WorkspaceDialog>}
     {removal && <WorkspaceDialog title={p("unregisterProject")} onClose={() => setRemoval(null)} busy={removing}>
