@@ -31,6 +31,7 @@ mod communication;
 mod goals;
 mod job_projection;
 mod overview_primary;
+mod runner_recent;
 mod store_read;
 mod trace;
 mod window_inventory;
@@ -50,6 +51,7 @@ use job_projection::{
     runner_jobs_for_auth, running_jobs_for_auth, session_jobs_for_auth, RunningJobSnapshot,
     RuntimeConsoleRunnerJob, RuntimeConsoleSessionJob,
 };
+use runner_recent::RunnerRecentCollector;
 
 // Runtime Console inventories are operator-facing and the underlying stores are
 // already bounded. Avoid arbitrary 10/20/50/100-row presentation cliffs that make
@@ -1961,49 +1963,51 @@ async fn runner_for_auth(
         .is_some_and(|visible| visible.truncated);
     let running_jobs = running_jobs_for_auth(runtime, auth, None).await?;
     let (jobs, jobs_truncated) = runner_jobs_for_auth(runtime, auth, client_id).await?;
-    let mut project_summaries = Vec::new();
-    let mut recent_sessions = Vec::new();
-    let mut session_scan_truncated = false;
-    for project in visible_projects
+    let runner_projects = visible_projects
         .map(|visible| visible.projects)
         .unwrap_or_default()
         .into_iter()
         .take(project_limit)
-    {
-        let mut list = runtime
-            .workflow_sessions_console_list(&project.id, Some(CONSOLE_AGGREGATE_SESSION_LIMIT));
+        .collect::<Vec<_>>();
+    // Share one store snapshot for the page rather than locking and projecting
+    // each Project separately (up to 2,000 times).
+    let project_ids = runner_projects
+        .iter()
+        .map(|project| project.id.as_str())
+        .collect::<Vec<_>>();
+    let mut lists = runtime
+        .workflow_sessions_console_lists(&project_ids, Some(CONSOLE_AGGREGATE_SESSION_LIMIT));
+    let mut project_summaries = Vec::with_capacity(runner_projects.len());
+    let mut recent = RunnerRecentCollector::default();
+    let mut session_scan_truncated = false;
+    for project in runner_projects {
+        let mut list = lists
+            .remove(&project.id)
+            .expect("visible Project has a console list");
         apply_running_jobs_to_list(&mut list, &project.id, &running_jobs);
         session_scan_truncated |= list.truncated;
-        recent_sessions.extend(list.sessions.iter().cloned().map(|session| {
-            RuntimeConsoleRecentSession {
-                client_id: client_id.to_string(),
-                project_id: project.id.clone(),
-                project_name: project.name.clone(),
-                session,
-            }
-        }));
+        let aggregate = aggregate_console_list(&list);
+        // Project summary has already consumed its borrowed list; move Session
+        // rows and retain only the newest hundred instead of cloning, sorting
+        // and storing every candidate in the Runner's Project inventory.
+        for session in list.sessions {
+            recent.offer(client_id, &project.id, project.name.as_deref(), session);
+        }
         project_summaries.push(RuntimeConsoleRunnerProject {
             id: project.id,
             name: project.name,
             path: project.path,
             connected: project.connected,
             runner_status: project.runner_status,
-            sessions: aggregate_console_list(&list),
+            sessions: aggregate,
         });
     }
     let projects_returned = project_summaries.len();
-    recent_sessions.sort_by(|a, b| b.session.updated_at.cmp(&a.session.updated_at));
-    let candidate_count = recent_sessions.len();
-    recent_sessions.truncate(DEFAULT_MAX_SESSIONS);
-    let recent_sessions = RuntimeConsoleRecentSessions {
-        returned: recent_sessions.len(),
-        candidate_count,
-        truncated: candidate_count > recent_sessions.len(),
-        scan_truncated: session_scan_truncated
+    let recent_sessions = recent.finish(
+        session_scan_truncated
             || visible_projects_truncated
             || projects_returned < visible_project_count,
-        sessions: recent_sessions,
-    };
+    );
     Ok(RuntimeConsoleRunner {
         server: status.get("server").cloned().unwrap_or(Value::Null),
         tool_request_trace_mode: safe_string(

@@ -22,6 +22,7 @@ mod communication;
 mod goals;
 mod overview;
 mod projects;
+mod runner_recent;
 mod session_collaboration;
 mod sessions;
 mod window_activity;
