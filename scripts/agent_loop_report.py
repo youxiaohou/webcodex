@@ -1527,10 +1527,11 @@ def _audit_sort_key(event: dict[str, Any]) -> tuple[int, str]:
 def _window_timing(
     outer: list[dict[str, Any]],
     continuity_events: list[dict[str, Any]] | None = None,
-) -> tuple[dict[str, Any], int, int]:
+) -> tuple[dict[str, Any], int, int, dict[str, dict[str, Any]]]:
     selected_ids = {str(event["event_id"]) for event in outer}
     previous: dict[tuple[str, str, str], dict[str, Any]] = {}
     gaps: list[int] = []
+    gap_pairs: dict[tuple[str, str], list[int]] = {}
     missing_serial = 0
     overlap_count = 0
     source = continuity_events if continuity_events is not None else outer
@@ -1563,12 +1564,28 @@ def _window_timing(
                 and isinstance(previous_handed, int)
                 and current_started >= previous_handed
             ):
-                gaps.append(current_started - previous_handed)
+                gap = current_started - previous_handed
+                gaps.append(gap)
+                earlier_tool = predecessor.get("operation")
+                later_tool = event.get("operation")
+                if (isinstance(earlier_tool, str) and earlier_tool
+                        and isinstance(later_tool, str) and later_tool):
+                    gap_pairs.setdefault((earlier_tool, later_tool), []).append(gap)
             else:
                 missing_serial += 1
         if event.get("window_continuity_eligible") is True:
             previous[key] = event
-    return _metric_distribution(gaps, missing=missing_serial), overlap_count, missing_serial
+    # Only persisted operation names are exposed, never Window/principal identity.
+    # Limit cardinality and keep the heaviest observed gaps first. Incomplete
+    # chains remain incomplete in the overall gap distribution above.
+    ranked_pairs = sorted(
+        gap_pairs.items(), key=lambda item: (-sum(item[1]), item[0])
+    )[:10]
+    by_pair = {
+        f"{earlier} -> {later}": _metric_distribution(values)
+        for (earlier, later), values in ranked_pairs
+    }
+    return _metric_distribution(gaps, missing=missing_serial), overlap_count, missing_serial, by_pair
 
 
 def _summarize_host_short_chains(
@@ -1746,7 +1763,7 @@ def _summarize_audit(
         if isinstance(tool_name, str) and tool_name:
             edit_outcomes_by_tool.setdefault(tool_name, Counter())[outcome] += 1
 
-    gaps, overlap_count, missing_serial = _window_timing(outer, continuity_events)
+    gaps, overlap_count, missing_serial, gap_pairs = _window_timing(outer, continuity_events)
     host_short_chain, host_short_chain_availability = _summarize_host_short_chains(
         outer, continuity_events
     )
@@ -1799,6 +1816,7 @@ def _summarize_audit(
             "webcodex_service_ms": service,
             "tool_runtime_ms": runtime_duration,
             "outside_webcodex_gap_ms": gaps,
+            "outside_webcodex_gap_by_tool_pair": gap_pairs,
             "overlap_count": overlap_count,
         },
         "results": {"serialized_tool_result_bytes": result_byte_metric},
@@ -1937,6 +1955,7 @@ def _summarize_trace_only(trace_events: list[dict[str, Any]], variant: str | Non
             "webcodex_service_ms": _metric_distribution([], missing=len(handlers)),
             "tool_runtime_ms": _metric_distribution([], missing=len(handlers)),
             "outside_webcodex_gap_ms": _metric_distribution([]),
+            "outside_webcodex_gap_by_tool_pair": {},
             "overlap_count": None,
         },
         "results": {"serialized_tool_result_bytes": _metric_distribution([], missing=len(handlers))},

@@ -449,6 +449,9 @@ class AgentLoopReportTests(unittest.TestCase):
         self.assertEqual(gap["samples"], 1)
         self.assertEqual(gap["total"], 30)
         self.assertEqual(gap["p50"], 30)
+        by_pair = result["timing"]["outside_webcodex_gap_by_tool_pair"]
+        self.assertEqual(len(by_pair), 1)
+        self.assertEqual(next(iter(by_pair.values()))["total"], 30)
         self.assertEqual(result["canonical_calls"]["total"], 3)
 
     def test_host_short_chain_reports_exact_serial_window_evidence(self) -> None:
