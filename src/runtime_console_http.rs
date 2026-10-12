@@ -1812,39 +1812,13 @@ async fn overview_for_auth_detail(
     include_sessions: bool,
 ) -> Result<RuntimeConsoleOverview, RuntimeConsoleError> {
     require_runtime_read(auth)?;
-    let (status, runners_value) = tokio::try_join!(
-        runtime_status_value(runtime, auth, None),
-        list_runners_value(runtime, auth, None),
-    )?;
+    // The compact Runtime Status tool performs a separate registry snapshot
+    // and full Job-history refresh. The summary-only Runner projection already
+    // supplies the authorized fleet counts and active Job total needed here.
+    // Avoid that duplicate scan; derive static service/build metadata locally.
+    let runners_value = list_runners_value(runtime, auth, None).await?;
     let summary = runners_value.get("summary").unwrap_or(&Value::Null);
-    let build = status.get("build").unwrap_or(&Value::Null);
-    let status_clients = status
-        .get("runners")
-        .and_then(|value| value.get("clients"))
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let source_mismatched_runners = status_clients
-        .iter()
-        .filter(|client| {
-            client
-                .get("source_alignment")
-                .and_then(|value| value.get("status"))
-                .and_then(Value::as_str)
-                == Some("different")
-        })
-        .count();
-    let mixed_builds_present = status_clients.iter().any(|client| {
-        client
-            .get("version_matches_server")
-            .and_then(Value::as_bool)
-            == Some(false)
-            || client
-                .get("source_alignment")
-                .and_then(|value| value.get("status"))
-                .and_then(Value::as_str)
-                == Some("different")
-    });
+    let build = crate::build_info::runtime_build_info();
     let project_access = project_read_available(auth);
     let visible = if project_access {
         Some(projects_for_auth(runtime, auth, Some(HOME_PROJECT_SCAN_LIMIT)).await?)
@@ -1885,7 +1859,9 @@ async fn overview_for_auth_detail(
             }
         },
     );
-    let runners = runner_fleet_rows(&runners_value, &status_clients, &home);
+    // Summary-only Runner rows omit per-runner alignment details; as before,
+    // this overview projection reports no alignment mismatches from that source.
+    let runners = runner_fleet_rows(&runners_value, &[], &home);
     let runner_count = safe_usize(summary.get("count")).max(runners.len());
     let online = safe_usize(summary.get("online"));
     let stale = safe_usize(summary.get("stale"));
@@ -1897,21 +1873,17 @@ async fn overview_for_auth_detail(
         visible_project_families: overview_primary::family_count(&home.projects),
         authenticated_user: auth.username.clone(),
         effective_config: runtime.effective_config_status(),
-        service: safe_string(status.get("service"), 80),
-        version: safe_string(status.get("version"), 80),
-        build_git_commit: safe_string(build.get("git_commit"), 80),
-        build_git_dirty: build.get("git_dirty").and_then(Value::as_bool),
+        service: Some("webcodex".to_string()),
+        version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        build_git_commit: build.git_commit.map(str::to_string),
+        build_git_dirty: build.git_dirty,
         runner_count,
         runners_online: online,
         runners_stale: stale,
         runners_unavailable: unavailable,
-        source_mismatched_runners,
-        mixed_builds_present,
-        active_jobs: safe_usize(
-            status
-                .get("jobs")
-                .and_then(|value| value.get("active_count")),
-        ),
+        source_mismatched_runners: 0,
+        mixed_builds_present: false,
+        active_jobs: safe_usize(summary.get("active_jobs_total")),
         active_windows,
         projects_available: project_access,
         visible_projects: visible.as_ref().map_or(0, |value| value.total),

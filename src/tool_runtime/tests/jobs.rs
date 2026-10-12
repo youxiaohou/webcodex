@@ -2928,6 +2928,41 @@ async fn runtime_status_and_list_runners_filter_concurrency_counts_by_auth_group
     );
     assert!(agents_a.output.get("clients").is_none());
     assert!(agents_a.output["summary"].get("clients").is_none());
+    let compact_agents_a = runtime
+        .dispatch_with_auth(
+            ToolCall::ListRunners {
+                query: None,
+                status: None,
+                limit: None,
+                client_id: None,
+                client_ids: None,
+                include_projects: Some(false),
+                summary_only: true,
+            },
+            Some(&shared_a),
+        )
+        .await;
+    assert!(compact_agents_a.success, "{:?}", compact_agents_a.error);
+    assert_eq!(compact_agents_a.output["summary"]["active_jobs_total"], 2);
+    // Console overview consumes this summary instead of the expensive
+    // compact Runtime Status history projection. Keep fleet-wide active
+    // counts identical under the same authorization boundary.
+    let compact_status_a = runtime
+        .dispatch_with_auth(
+            ToolCall::RuntimeStatus {
+                compact: true,
+                summary_only: true,
+                client_id: None,
+            },
+            Some(&shared_a),
+        )
+        .await;
+    assert!(compact_status_a.success, "{:?}", compact_status_a.error);
+    assert_eq!(
+        compact_agents_a.output["summary"]["active_jobs_total"],
+        compact_status_a.output["jobs"]["active_count"]
+    );
+
     let new_observability = agents_a.output["runners"][0]["job_concurrency"]
         .as_object()
         .unwrap();

@@ -258,6 +258,13 @@ impl ToolRuntime {
             .runner_registry
             .active_job_summary_by_runner_for_auth(access.as_ref())
             .await;
+        // This total includes authorized active Jobs even if their Runner is no
+        // longer present in the registry. Runtime Console's overview needs the
+        // same fleet-wide count without a second historical Job projection.
+        let active_jobs_total = active_counts
+            .values()
+            .map(|counts| counts.active)
+            .sum::<usize>();
         let now = chrono::Utc::now().timestamp();
         let include_projects = options.include_projects.unwrap_or(true);
         let runners: Vec<Value> = if options.summary_only {
@@ -345,6 +352,7 @@ impl ToolRuntime {
                     "online": online,
                     "offline": clients.len().saturating_sub(online),
                     "stale": stale,
+                    "active_jobs_total": active_jobs_total,
                 },
                 "count": clients.len(),
                 "matched_count": matched_count,
