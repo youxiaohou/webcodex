@@ -483,6 +483,7 @@ pub fn cold_session_from_persisted(
         updated_at: persisted.updated_at,
         project_instructions,
         raw,
+        console_list_cache: Arc::new(std::sync::Mutex::new(None)),
         resident_instructions: None,
         unfenced_completion_ids: Vec::new(),
     })

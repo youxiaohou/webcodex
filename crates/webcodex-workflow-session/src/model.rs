@@ -2,7 +2,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{value::RawValue, Value};
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use webcodex_core::project_instructions::{
     ProjectInstructionsSnapshot, ProjectInstructionsSummarySnapshot,
@@ -226,6 +226,10 @@ pub struct ColdSessionRecord {
     pub updated_at: i64,
     pub project_instructions: Option<ProjectInstructionsSummarySnapshot>,
     pub raw: Arc<RawValue>,
+    /// A single bounded, lazy Console projection for immutable Closed history.
+    /// Active Cold Sessions never populate it; the raw-byte identity guards
+    /// against reusing a view after any internal record replacement.
+    pub(crate) console_list_cache: Arc<Mutex<Option<super::console::CachedConsoleList>>>,
     /// Process-local instruction bodies are not part of the durable ledger. Keep
     /// them across Active compaction so an incomplete future scan can retain rules.
     pub resident_instructions: Option<Arc<ProjectInstructionsSnapshot>>,
