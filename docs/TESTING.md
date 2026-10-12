@@ -97,6 +97,55 @@ its own result. Without an explicit authorized Session, only in-flight sharing
 is enabled. Snapshot retention is bounded to 64 entries / 8 MiB per runtime,
 and the in-flight index to 128 entries (excess reads bypass sharing).
 
+## Optional shared Cargo cache for Windows linked worktrees
+
+When several linked Git worktrees independently run Rust checks on Windows,
+their default per-worktree `target/` directories can duplicate large amounts of
+dependency build output. This is developer build-time/disk overhead, not a
+WebCodex Runtime or end-to-end task latency claim. The opt-in
+[`scripts/cargo_shared_worktree_target.ps1`](../scripts/cargo_shared_worktree_target.ps1)
+helper selects the **primary checkout's existing `target/` directory** for a
+Cargo invocation from a linked worktree of the same Git repository.
+
+Use PowerShell from the selected worktree:
+
+```powershell
+& ./scripts/cargo_shared_worktree_target.ps1 `
+    -WorktreePath . `
+    -CargoArgs @('test', '--locked', '-p', 'webcodex', '--lib', 'tool_call') `
+    -DryRun
+```
+
+Inspect the reported `worktree`, `primary_checkout`, `shared_target` and
+`cargo_args`. Omit `-DryRun` **only when a focused compilation/test is actually
+needed**. No Cargo build or target directory is created during `-DryRun`.
+Ordinary direct `cargo` commands remain unchanged. This helper is deliberately
+not wired into CI, automatic tool dispatch, desktop release packaging or any
+Server/Runner launch path.
+
+The helper verifies a shared Git common directory with the script's own
+repository, requires both worktrees to contain a workspace-root Cargo manifest,
+rejects a caller-selected target/config/manifest/cwd override, and refuses to
+replace an existing `CARGO_TARGET_DIR`. It restores the caller's working
+directory and environment whether Cargo succeeds or fails. Cargo's own build
+cache locks and fingerprints remain authoritative: a different Rust toolchain,
+features, profile, compiler flags or changed workspace sources can still
+require recompilation, and simultaneous builds may serialize on the shared
+target. The helper is **not** a safety boundary for untrusted Cargo packages:
+build scripts run with the existing caller's authority.
+
+Run the independent no-Cargo smoke test:
+
+```powershell
+& ./scripts/tests/test_cargo_shared_worktree_target.ps1
+```
+
+It uses a disposable fake Cargo executable to validate arguments, shared path,
+dry-run behavior, foreign-repository rejection, error propagation and
+environment restoration. It never runs a real Cargo compile. Do not delete
+existing per-worktree targets automatically; operators should review disk
+usage and worktree ownership before any manual cleanup.
+
 ## Full Local Server Suite
 
 Plain `cargo test` must work without a special environment variable or wrapper,
