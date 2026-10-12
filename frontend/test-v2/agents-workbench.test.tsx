@@ -190,6 +190,68 @@ it("does not overlap slow renewals and ignores their responses after disable", a
   }
 });
 
+it("observes a newly delivered active Agent inbox message within 10 seconds without global inventory polling", async () => {
+  vi.useFakeTimers();
+  let unmount = () => {};
+  try {
+    const attached = { endpoint_id: "endpoint-fast", controller_generation: 1, lifecycle: "attached" };
+    let deliveries: Array<{ delivery_id: string }> = [];
+    const client = clientFor(() => ok({ messages: [] }), path => {
+      if (path === "communication/endpoint/attach") return ok({ endpoint: attached });
+      if (path === "communication/inbox") return ok({ deliveries });
+      return ok({});
+    });
+    const unauthorized = vi.fn();
+    const hook = renderHook(() => useAgentWorkspace(client, true, unauthorized));
+    unmount = hook.unmount;
+    await act(async () => {});
+    await act(async () => { expect(await hook.result.current.attach()).toBe(true); });
+    const count = (path: string) => vi.mocked(client.post).mock.calls.filter(call => call[0] === path).length;
+    expect(count("communication/inbox")).toBe(1);
+    const inventories = count("communication/agents");
+    deliveries = [{ delivery_id: "new-delivery" }];
+    await act(async () => { await vi.advanceTimersByTimeAsync(9_999); });
+    expect(hook.result.current.inbox).toHaveLength(0);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(count("communication/inbox")).toBe(2);
+    expect(hook.result.current.inbox).toEqual(deliveries);
+    expect(count("communication/agents")).toBe(inventories);
+  } finally {
+    unmount(); vi.useRealTimers();
+  }
+});
+
+it("does not repeat an in-flight inbox request or poll without an attached Agent endpoint", async () => {
+  vi.useFakeTimers();
+  let unmount = () => {};
+  try {
+    let resolveInbox!: (value: unknown) => void;
+    const pending = new Promise(resolve => { resolveInbox = resolve; });
+    const attached = { endpoint_id: "endpoint-slow", controller_generation: 1, lifecycle: "attached" };
+    const client = clientFor(() => ok({ messages: [] }), path => {
+      if (path === "communication/endpoint/attach") return ok({ endpoint: attached });
+      if (path === "communication/inbox") return pending;
+      return ok({});
+    });
+    const unauthorized = vi.fn();
+    const hook = renderHook(() => useAgentWorkspace(client, true, unauthorized));
+    unmount = hook.unmount;
+    await act(async () => {});
+    const count = () => vi.mocked(client.post).mock.calls.filter(call => call[0] === "communication/inbox").length;
+    await act(async () => { await vi.advanceTimersByTimeAsync(9_000); });
+    expect(count()).toBe(0);
+    await act(async () => { expect(await hook.result.current.attach()).toBe(true); });
+    expect(count()).toBe(1);
+    // Two fast ticks, before the independent 30s full-inventory refresh.
+    await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
+    expect(count()).toBe(1);
+    await act(async () => resolveInbox(ok({ deliveries: [{ delivery_id: "slow" }] })));
+    expect(hook.result.current.inbox).toHaveLength(1);
+  } finally {
+    unmount(); vi.useRealTimers();
+  }
+});
+
 it("hidden pages pause inventory observations without pausing the current Endpoint lease", async () => {
   vi.useFakeTimers();
   const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
@@ -207,17 +269,20 @@ it("hidden pages pause inventory observations without pausing the current Endpoi
     await act(async () => { expect(await hook.result.current.attach()).toBe(true); });
     const count = (path: string) => vi.mocked(client.post).mock.calls.filter(call => call[0] === path).length;
     const inventoryReads = count("communication/agents");
+    const inboxReads = count("communication/inbox");
     visibility.mockReturnValue("hidden");
     act(() => document.dispatchEvent(new Event("visibilitychange")));
     await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
     await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
     expect(count("communication/agents")).toBe(inventoryReads);
+    expect(count("communication/inbox")).toBe(inboxReads);
     expect(count("communication/endpoint/renew")).toBe(2);
     expect(hook.result.current.endpoint?.endpoint_id).toBe(attached.endpoint_id);
     visibility.mockReturnValue("visible");
     act(() => { document.dispatchEvent(new Event("visibilitychange")); window.dispatchEvent(new Event("focus")); });
     await act(async () => { await vi.advanceTimersByTimeAsync(150); });
     expect(count("communication/agents")).toBe(inventoryReads + 1);
+    expect(count("communication/inbox")).toBe(inboxReads + 1);
   } finally {
     unmount(); visibility.mockRestore(); vi.useRealTimers();
   }

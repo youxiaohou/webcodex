@@ -72,11 +72,13 @@ export function useAgentWorkspace(
   const [conversationDetail, setConversationDetail] = useState<ConversationDetail | null>(null);
   const [endpoints, setEndpoints] = useState<Map<string, AgentEndpoint>>(new Map());
   const [inbox, setInbox] = useState<InboxDelivery[]>([]);
+  const [inboxRevision, setInboxRevision] = useState(0);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
   const [revision, setRevision] = useState(0);
   const request = useRef<AbortController | null>(null);
   const refreshQueued = useRef(false);
+  const inboxPending = useRef<AbortController | null>(null);
   const pendingAgentCreate = useRef<PendingKey>(null);
   const pendingConversationCreate = useRef<PendingKey>(null);
   const pendingMessage = useRef<PendingKey>(null);
@@ -200,6 +202,7 @@ export function useAgentWorkspace(
       return;
     }
     const controller = new AbortController();
+    inboxPending.current = controller;
     void fetchInbox(client, selectedAgentId, endpoint, controller.signal).then((response) => {
       if (controller.signal.aborted || !response) return;
       if (response.status === 401) {
@@ -222,9 +225,22 @@ export function useAgentWorkspace(
       if (response.ok && response.data) {
         setInbox(Array.isArray(response.data.deliveries) ? response.data.deliveries : []);
       }
+    }).finally(() => {
+      if (inboxPending.current === controller) inboxPending.current = null;
     });
-    return () => controller.abort();
-  }, [client, enabled, endpoint?.controller_generation, endpoint?.endpoint_id, onUnauthorized, selectedAgentId, revision]);
+    return () => {
+      controller.abort();
+      if (inboxPending.current === controller) inboxPending.current = null;
+    };
+  }, [client, enabled, endpoint?.controller_generation, endpoint?.endpoint_id, onUnauthorized, selectedAgentId, revision, inboxRevision]);
+
+  // An attached, foreground Agent needs prompt delivery observations. Poll
+  // only the selected inbox, not full Agent/Conversation inventories; never
+  // overlap an unresolved read. Hidden pages remain quiescent. Keep Endpoint
+  // lease renewal on its separate 30s lifecycle below.
+  useVisibleRefresh(enabled && Boolean(selectedAgentId && endpoint), () => {
+    if (!inboxPending.current) setInboxRevision((value) => value + 1);
+  }, 10_000);
 
   // Data observation pauses when hidden. Endpoint renewal below is a lease
   // lifecycle, not a UI poll: do not bind it to document visibility.
