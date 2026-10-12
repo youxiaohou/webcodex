@@ -135,6 +135,31 @@ These commands are evidence for the boundary they exercise, not a routine pre-co
 check. Prefer one exact ignored test while iterating, then the relevant group when the
 change is ready for review.
 
+## No-build guidance preflight
+
+Before compiling Rust after changing model-facing tool guidance or its literal
+test requirements, run `python3 scripts/check_builtin_guidance_contract.py`
+(Windows: `python`). It reads the canonical Direct and Host guidance
+contributors, the corresponding Rust test phrase arrays, and the Rust-owned
+item-count/character limits. It fails closed on unexpected source layouts or
+missing literal phrases; no Cargo command or network access is involved.
+
+The ordinary Linux Server CI Rust shard runs this cheap preflight **before**
+the package compile. It catches straightforward guidance drift before the
+expensive Rust suite, but **does not replace** that suite or prove the dynamic
+standard startup payload is below 16 KiB. All existing Server, experimental
+Code Mode, permission, schema, and platform gates still run after a successful
+preflight. Changing a valid Rust guidance representation may require updating
+this intentionally strict static parser and its fixtures together.
+
+Run `python3 -m unittest scripts.tests.test_check_builtin_guidance_contract`
+for focused non-compiling negative cases. They cover over-budget guidance,
+missing text required by Rust tests, malformed literals, and pre-Cargo CI
+ordering. The verifier also reproduced three historical failed PR guidance
+revisions in less than two milliseconds each, while accepting the corrected
+revision; actual CI savings depend on where the failing build would have
+stopped otherwise.
+
 ## CI Mapping
 
 The lanes above define test semantics; workflows decide when to run them.
