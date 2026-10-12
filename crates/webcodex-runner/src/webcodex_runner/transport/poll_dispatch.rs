@@ -1,8 +1,8 @@
 //! Polling request admission, bounded dispatch workers and recovery decisions.
 //! Transport supervision owns reconnects; the dispatch module owns request execution.
 use super::http_client::{
-    bounded_single_line, is_unknown_polling_session, looks_like_auth_failure_message, post_json,
-    RunnerHttpError, RunnerHttpErrorKind,
+    bounded_single_line, is_unknown_polling_session, looks_like_auth_failure_message,
+    post_poll_json, RunnerHttpError, RunnerHttpErrorKind,
 };
 use super::{HttpSendConfig, RunnerSink, SubmitResultError};
 use crate::webcodex_runner;
@@ -509,7 +509,7 @@ pub(crate) fn handle_one_poll(
     dispatches: &ActivityTracker,
     polling_dispatches: &mut PollingDispatchSupervisor,
     once: bool,
-) -> Result<(bool, Option<ShellProjectInventoryStatus>), PollError> {
+) -> Result<(bool, bool, Option<ShellProjectInventoryStatus>), PollError> {
     let metadata_config = runtime.snapshot();
     let provider_update =
         metadata_config
@@ -538,15 +538,19 @@ pub(crate) fn handle_one_poll(
         computer_session_availability: computer_session_update,
         project_inventory_page,
     };
-    let response: RunnerPollResponse = match post_json(client, cfg, RUNNER_POLL_PATH, &poll) {
-        Ok(response) => response,
-        Err(error) => {
-            if let Some((_, provider, revision)) = provider_update {
-                provider.release_status_update(revision);
+    // Do not delay one-shot polls or paged inventory acknowledgements.
+    // A deliberately longer configured polling interval remains authoritative.
+    let long_poll = !once && poll.project_inventory_page.is_none() && cfg.poll_interval_ms <= 3_500;
+    let response: RunnerPollResponse =
+        match post_poll_json(client, cfg, RUNNER_POLL_PATH, &poll, long_poll) {
+            Ok(response) => response,
+            Err(error) => {
+                if let Some((_, provider, revision)) = provider_update {
+                    provider.release_status_update(revision);
+                }
+                return Err(PollError::from_http(error, &cfg.client_id));
             }
-            return Err(PollError::from_http(error, &cfg.client_id));
-        }
-    };
+        };
     if !response.success {
         if let Some((_, provider, revision)) = provider_update {
             provider.release_status_update(revision);
@@ -572,8 +576,9 @@ pub(crate) fn handle_one_poll(
     });
     jobs.install_sink(sink.clone());
     let inventory_status = response.project_inventory.clone();
+    let waited = long_poll && response.poll_wait_supported;
     let Some(request) = response.request else {
-        return Ok((false, inventory_status));
+        return Ok((false, waited, inventory_status));
     };
     let hot = runtime.snapshot();
     let runtime = Arc::clone(runtime);
@@ -599,7 +604,7 @@ pub(crate) fn handle_one_poll(
     };
     if !once {
         polling_dispatches.spawn(dispatch)?;
-        return Ok((true, inventory_status));
+        return Ok((true, waited, inventory_status));
     }
 
     // `--once` deliberately retains its existing synchronous contract: the
@@ -655,6 +660,6 @@ pub(crate) fn handle_one_poll(
     }
     let _ = polling_dispatches.background_threads.reap_finished();
     result
-        .map(|outcome| (outcome.handled, inventory_status))
+        .map(|outcome| (outcome.handled, waited, inventory_status))
         .map_err(PollError::from_submit)
 }

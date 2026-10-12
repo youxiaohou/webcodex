@@ -447,7 +447,7 @@ pub(super) fn run_polling_session(
             poll_result = Err(error);
         }
         match poll_result {
-            Ok((ran_request, inventory_status)) => {
+            Ok((ran_request, server_waited, inventory_status)) => {
                 if sent_inventory_page {
                     match inventory_status {
                         Some(status) => {
@@ -522,7 +522,17 @@ pub(super) fn run_polling_session(
                     )
                     .map(|()| PollingSessionExit::Completed);
                 }
-                if let Some(delay) = polling_idle_delay(&mut idle_backoff, ran_request) {
+                // The server has already waited for a queued task, so do
+                // not impose the extra 1/2/5s idle delay on top of that wait.
+                // An older Server returns no acknowledgement, retaining the
+                // normal idle backoff and avoiding a busy loop.
+                if server_waited {
+                    idle_backoff.reset();
+                }
+                if let Some(delay) = (!server_waited)
+                    .then(|| polling_idle_delay(&mut idle_backoff, ran_request))
+                    .flatten()
+                {
                     if sleep_or_shutdown(delay, shutdown.as_ref()) {
                         return complete_polling_after_shutdown(
                             &client,

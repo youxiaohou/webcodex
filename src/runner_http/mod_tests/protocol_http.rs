@@ -195,3 +195,68 @@ async fn polling_http_offline_releases_only_the_matching_active_instance() {
     assert_eq!(current.runner_instance_id, "inst-b");
     assert!(current.connected);
 }
+
+#[tokio::test]
+async fn polling_http_wait_header_wakes_for_enqueued_work_and_old_protocol_stays_immediate() {
+    use salvo::test::{ResponseExt, TestClient};
+    use salvo::Service;
+    use std::time::{Duration, Instant};
+
+    let registry = Arc::new(RunnerRegistry::default());
+    registry
+        .register(runner_registration("http-push", "inst", Vec::new()))
+        .await
+        .unwrap();
+    let service = Service::new(
+        Router::new()
+            .hoop(affix_state::inject(registry.clone()))
+            .hoop(affix_state::inject(auth_context(None, true)))
+            .push(Router::with_path("api/shell/agent/poll").post(runner_poll)),
+    );
+
+    // Legacy clients omit the header: preserve the immediate, empty response
+    // and omit the new opt-in acknowledgement from JSON.
+    let mut legacy = TestClient::post("http://localhost/api/shell/agent/poll")
+        .json(&json!({"client_id":"http-push","agent_instance_id":"inst"}))
+        .send(&service)
+        .await;
+    let old_body: serde_json::Value = legacy.take_json().await.unwrap();
+    assert_eq!(old_body["success"], true);
+    assert!(old_body["request"].is_null());
+    assert!(old_body.get("poll_wait_supported").is_none());
+
+    let start = Instant::now();
+    let wait = TestClient::post("http://localhost/api/shell/agent/poll")
+        .add_header("x-webcodex-poll-wait-ms", "3500", true)
+        .json(&json!({"client_id":"http-push","agent_instance_id":"inst"}))
+        .send(&service);
+    let enqueue = async {
+        tokio::time::sleep(Duration::from_millis(180)).await;
+        registry
+            .enqueue_run(
+                ShellRunRequest {
+                    login: false,
+                    client_id: "http-push".into(),
+                    cwd: None,
+                    command: "echo wake".into(),
+                    stdin: None,
+                    timeout_secs: 10,
+                    wait_timeout_secs: 0,
+                },
+                "tester".into(),
+            )
+            .await
+            .unwrap()
+            .0
+    };
+    let (mut result, request_id) = tokio::join!(wait, enqueue);
+    assert_eq!(result.status_code, Some(StatusCode::OK));
+    let body: serde_json::Value = result.take_json().await.unwrap();
+    assert_eq!(body["success"], true);
+    assert_eq!(body["poll_wait_supported"], true);
+    assert_eq!(body["request"]["request_id"], request_id);
+    assert!(
+        start.elapsed() < Duration::from_secs(2),
+        "poll dispatch should beat idle 5s backoff"
+    );
+}

@@ -2282,6 +2282,10 @@ pub struct RunnerRequest {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RunnerPollResponse {
     pub success: bool,
+    /// New Servers acknowledge optional request-triggered polling waits.
+    /// Old Servers omit this; the Runner retains its normal idle backoff.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub poll_wait_supported: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request: Option<RunnerRequest>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3402,6 +3406,7 @@ mod envelope_tests {
         let polling: RunnerPollResponse = serde_json::from_value(
             serde_json::to_value(RunnerPollResponse {
                 success: true,
+                poll_wait_supported: false,
                 request: Some(request.clone()),
                 error: None,
                 project_inventory: None,
@@ -3448,6 +3453,7 @@ mod envelope_tests {
         let polling: RunnerPollResponse = serde_json::from_value(
             serde_json::to_value(RunnerPollResponse {
                 success: true,
+                poll_wait_supported: false,
                 request: Some(request.clone()),
                 error: None,
                 project_inventory: None,
@@ -3497,6 +3503,7 @@ mod envelope_tests {
         let polling: RunnerPollResponse = serde_json::from_value(
             serde_json::to_value(RunnerPollResponse {
                 success: true,
+                poll_wait_supported: false,
                 request: Some(request.clone()),
                 error: None,
                 project_inventory: None,
@@ -3547,6 +3554,7 @@ mod envelope_tests {
         let polling: RunnerPollResponse = serde_json::from_value(
             serde_json::to_value(RunnerPollResponse {
                 success: true,
+                poll_wait_supported: false,
                 request: Some(request.clone()),
                 error: None,
                 project_inventory: None,

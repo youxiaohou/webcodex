@@ -205,6 +205,9 @@ pub(super) fn next_request_id() -> String {
 }
 
 pub(super) fn notify_runner_locked(inner: &RunnerRegistryInner, client_id: &str) {
+    if let Some(runner) = inner.runners.get(client_id) {
+        runner.poll_notify.notify_one();
+    }
     if let Some(entry) = inner.notifiers.get(client_id) {
         entry.notify.notify_one();
     }

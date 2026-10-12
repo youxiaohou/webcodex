@@ -521,6 +521,22 @@ where
     post_json_with_auth(client, &cfg.server_url, &cfg.token, path, body)
 }
 
+/// The server acknowledges long-poll support in the response contract. An old
+/// Server ignores this header and leaves the Runner's idle backoff unchanged.
+pub(crate) fn post_poll_json<T, R>(
+    client: &Client,
+    cfg: &RunnerConfig,
+    path: &str,
+    body: &T,
+    long_poll: bool,
+) -> Result<R, RunnerHttpError>
+where
+    T: serde::Serialize + ?Sized,
+    R: serde::de::DeserializeOwned,
+{
+    post_json_with_auth_options(client, &cfg.server_url, &cfg.token, path, body, long_poll)
+}
+
 pub(crate) fn post_json_with_auth<T, R>(
     client: &Client,
     server_url: &str,
@@ -532,10 +548,29 @@ where
     T: serde::Serialize + ?Sized,
     R: serde::de::DeserializeOwned,
 {
+    post_json_with_auth_options(client, server_url, token, path, body, false)
+}
+
+fn post_json_with_auth_options<T, R>(
+    client: &Client,
+    server_url: &str,
+    token: &str,
+    path: &str,
+    body: &T,
+    long_poll: bool,
+) -> Result<R, RunnerHttpError>
+where
+    T: serde::Serialize + ?Sized,
+    R: serde::de::DeserializeOwned,
+{
     let url = format!("{}{}", server_url.trim_end_matches('/'), path);
     let mut req = client.post(url);
     if !token.trim().is_empty() {
         req = req.bearer_auth(token.trim());
+    }
+    if long_poll {
+        // 3.5s fits inside the 5s overall HTTP timeout, including JSON decode.
+        req = req.header("x-webcodex-poll-wait-ms", "3500");
     }
     let resp = req
         .json(body)

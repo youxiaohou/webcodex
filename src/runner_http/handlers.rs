@@ -152,6 +152,7 @@ pub async fn runner_poll(req: &mut Request, depot: &mut Depot, res: &mut Respons
         res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
         res.render(Json(RunnerPollResponse {
             success: false,
+            poll_wait_supported: false,
             request: None,
             error: Some("Runner registry not configured".to_string()),
             project_inventory: None,
@@ -164,6 +165,7 @@ pub async fn runner_poll(req: &mut Request, depot: &mut Depot, res: &mut Respons
             res.status_code(StatusCode::BAD_REQUEST);
             res.render(Json(RunnerPollResponse {
                 success: false,
+                poll_wait_supported: false,
                 request: None,
                 error: Some(format!("Invalid JSON: {}", e)),
                 project_inventory: None,
@@ -176,6 +178,7 @@ pub async fn runner_poll(req: &mut Request, depot: &mut Depot, res: &mut Respons
         res.status_code(StatusCode::FORBIDDEN);
         res.render(Json(RunnerPollResponse {
             success: false,
+            poll_wait_supported: false,
             request: None,
             error: Some(e),
             project_inventory: None,
@@ -186,6 +189,7 @@ pub async fn runner_poll(req: &mut Request, depot: &mut Depot, res: &mut Respons
         res.status_code(StatusCode::FORBIDDEN);
         res.render(Json(RunnerPollResponse {
             success: false,
+            poll_wait_supported: false,
             request: None,
             error: Some(e),
             project_inventory: None,
@@ -200,6 +204,7 @@ pub async fn runner_poll(req: &mut Request, depot: &mut Depot, res: &mut Respons
         res.status_code(StatusCode::FORBIDDEN);
         res.render(Json(RunnerPollResponse {
             success: false,
+            poll_wait_supported: false,
             request: None,
             error: Some(e),
             project_inventory: None,
@@ -222,10 +227,20 @@ pub async fn runner_poll(req: &mut Request, depot: &mut Depot, res: &mut Respons
             body.computer_session_availability,
         )
         .await;
+    let poll_wait_ms = req
+        .headers()
+        .get("x-webcodex-poll-wait-ms")
+        .and_then(|header| header.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(0)
+        .min(3_500);
     let client_id = body.request.client_id.clone();
     let runner_instance_id = body.request.runner_instance_id.clone();
     let inventory_page = body.project_inventory_page;
-    match registry.poll(body.request).await {
+    match registry
+        .poll_wait(body.request, std::time::Duration::from_millis(poll_wait_ms))
+        .await
+    {
         Ok(request) => {
             let project_inventory = if let Some(page) = inventory_page {
                 registry
@@ -237,6 +252,7 @@ pub async fn runner_poll(req: &mut Request, depot: &mut Depot, res: &mut Respons
             };
             res.render(Json(RunnerPollResponse {
                 success: true,
+                poll_wait_supported: poll_wait_ms > 0,
                 request,
                 error: None,
                 project_inventory,
@@ -246,6 +262,7 @@ pub async fn runner_poll(req: &mut Request, depot: &mut Depot, res: &mut Respons
             res.status_code(StatusCode::BAD_REQUEST);
             res.render(Json(RunnerPollResponse {
                 success: false,
+                poll_wait_supported: false,
                 request: None,
                 error: Some(e),
                 project_inventory: None,

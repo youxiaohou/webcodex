@@ -36,6 +36,45 @@ impl RunnerRegistry {
         self.poll_checked(body, None).await
     }
 
+    /// Optional HTTP long poll. A registered wakeup precedes the dequeue, so a
+    /// request enqueued between the first empty poll and the wait is never lost.
+    /// Existing polling clients retain the immediate-response contract.
+    pub async fn poll_wait(
+        &self,
+        body: RunnerPollRequest,
+        wait: std::time::Duration,
+    ) -> Result<Option<RunnerRequest>, String> {
+        if wait.is_zero() {
+            return self.poll(body).await;
+        }
+        validate_id(&body.client_id, "client_id")?;
+        validate_runner_instance_id(&body.runner_instance_id)?;
+        let wake = {
+            let inner = self.inner.lock().await;
+            let runner = inner
+                .runners
+                .get(&body.client_id)
+                .ok_or_else(|| format!("unknown shell client: {}", body.client_id))?;
+            if runner.runner_instance_id != body.runner_instance_id {
+                return Err(format!(
+                    "runner {} is no longer the active instance (stale or replaced)",
+                    body.client_id
+                ));
+            }
+            std::sync::Arc::clone(&runner.poll_notify)
+        };
+        let notified = wake.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if let Some(request) = self.poll(body.clone()).await? {
+            return Ok(Some(request));
+        }
+        let _ = tokio::time::timeout(wait, notified).await;
+        // The lease and all authorization/operation fences are rechecked after
+        // waking or expiring. A replaced Runner cannot dequeue old work.
+        self.poll(body).await
+    }
+
     /// Connection-scoped entry point for long-lived transports. The pump for a
     /// concrete WebSocket/QUIC connection passes its captured `connection_id`
     /// so a stale same-instance connection (whose lease was replaced by a

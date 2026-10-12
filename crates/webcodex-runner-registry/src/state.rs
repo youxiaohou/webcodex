@@ -53,6 +53,8 @@ pub(super) struct RunnerRecord {
     /// hand-off: once changed, the previous instance can no longer poll or
     /// submit results/job_updates.
     pub(super) runner_instance_id: String,
+    /// Server-side wakeup for HTTP long polling; independent of streaming notifiers.
+    pub(super) poll_notify: Arc<Notify>,
     /// Renewed on every accepted registration, including same-instance reconnects.
     /// This private presentation fence is not Runner execution authority.
     pub(super) registration_observation_epoch: String,
