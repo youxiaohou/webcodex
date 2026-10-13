@@ -109,7 +109,7 @@ fn checked_url(value: &str) -> Result<Url, Error> {
 }
 
 /// One immutable binding and one run. Reconstructing a client requires the host to
-/// resolve restart ambiguity; this library does not provide a durable receipt ledger.
+/// resolve restart ambiguity, or opt into `with_restart_recovery` before running.
 pub struct TunnelClient {
     cp: ControlPlaneIdentity,
     target: FixedMcpTarget,
@@ -118,6 +118,7 @@ pub struct TunnelClient {
     policy: DeadlinePolicy,
     limits: Limits,
     health: Health,
+    receipts: Option<run_fence::Receipts>,
 }
 impl TunnelClient {
     pub fn new(
@@ -189,10 +190,46 @@ impl TunnelClient {
             policy,
             limits,
             health: Health::default(),
+            receipts: None,
         })
     }
     pub fn health(&self) -> Health {
         self.health.clone()
+    }
+    /// Bind durable no-replay admission to this exact control plane, Tunnel and
+    /// local target/credential. Keep the returned ownership guard until run ends.
+    /// Stale protected runs are archived only when the host proves the old PID
+    /// absent. Legacy, missing, corrupt or differently bound history fails closed.
+    pub fn with_restart_recovery(
+        mut self,
+        root: &std::path::Path,
+        owner_started: Option<u64>,
+        owner_absent: impl FnOnce(&run_fence::RunIdentity) -> bool,
+    ) -> Result<(Self, run_fence::RunFence), &'static str> {
+        use sha2::{Digest, Sha256};
+        let mut hash = Sha256::new();
+        for value in [
+            self.cp.origin.as_str().as_bytes(),
+            self.cp.tunnel.as_bytes(),
+            self.target.url.as_str().as_bytes(),
+            self.target
+                .credential
+                .as_ref()
+                .map_or(&[][..], |c| c.0.as_bytes()),
+        ] {
+            hash.update((value.len() as u64).to_le_bytes());
+            hash.update(value);
+        }
+        let (guard, receipts) = run_fence::RunFence::acquire_restartable(
+            root,
+            self.cp.origin.as_str(),
+            &self.cp.tunnel,
+            hash.finalize().into(),
+            owner_started,
+            owner_absent,
+        )?;
+        self.receipts = Some(receipts);
+        Ok((self, guard))
     }
     /// Stop ingress, then allow admitted work ten seconds to settle, including response
     /// delivery. Dropping this future is abrupt owner loss, not a clean shutdown.

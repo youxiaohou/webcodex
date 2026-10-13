@@ -73,3 +73,43 @@ async fn unknown_type_and_protected_header_override_never_dispatch() {
     assert_eq!(finish(stop, task).await, Ok(()));
     assert!(mcp.requests.try_recv().is_err());
 }
+
+#[tokio::test]
+async fn abrupt_owner_loss_restarts_polling_without_replaying_the_old_effect() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let mut cp = Server::new().await;
+    let mut mcp = Server::new().await;
+    let (first, guard) = client(&cp, &mcp, Limits::default(), DeadlinePolicy::default())
+        .with_restart_recovery(&root, None, |_| true)
+        .unwrap();
+    let (_stop, task) = start(first);
+    let poll = cp.next().await;
+    poll.respond(200, &json!({"commands":[command("old")]}).to_string());
+    let old_effect = mcp.next().await;
+    assert_eq!(old_effect.json()["id"], "old");
+    // Effect reached MCP, but its terminal result was never observed by Tunnel.
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    old_effect.disconnect();
+    drop(guard);
+    // Dispose the cancelled owner's outstanding poll before the new fixture.
+    while let Ok(request) = cp.requests.try_recv() {
+        request.respond(204, "");
+    }
+    let (next, guard) = client(&cp, &mcp, Limits::default(), DeadlinePolicy::default())
+        .with_restart_recovery(&root, None, |_| true)
+        .unwrap();
+    let health = next.health();
+    let mut polls = Polls::start(&mut cp, vec![json!([command("old"), command("new")])]);
+    let (stop, task) = start(next);
+    let new_effect = mcp.next().await;
+    assert_eq!(new_effect.json()["id"], "new");
+    new_effect.respond(200, r#"{"jsonrpc":"2.0","id":"new","result":{}}"#);
+    polls.response().await.respond(200, "{}");
+    settled(&health).await;
+    assert_eq!(health.rejected_commands(), 1);
+    assert!(mcp.requests.try_recv().is_err());
+    assert_eq!(finish(stop, task).await, Ok(()));
+    guard.finish().unwrap();
+}

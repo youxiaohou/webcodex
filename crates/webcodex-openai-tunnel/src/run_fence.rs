@@ -8,12 +8,20 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[path = "run_receipts.rs"]
+mod receipts;
+pub(crate) use receipts::Receipts;
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RunIdentity {
     pub version: u32,
     pub run_id: String,
     pub owner_pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_binding: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_started: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -126,10 +134,23 @@ fn read(path: &Path) -> Result<Option<RunIdentity>, &'static str> {
     }
     let identity: RunIdentity =
         serde_json::from_slice(&bytes).map_err(|_| "tunnel_fence_invalid")?;
-    if identity.version != 2
+    if !matches!(identity.version, 2 | 3)
         || identity.owner_pid == 0
         || !uuid::Uuid::parse_str(&identity.run_id)
             .is_ok_and(|id| id.to_string() == identity.run_id)
+    {
+        return Err("tunnel_fence_invalid");
+    }
+    if identity.owner_started == Some(0)
+        || (identity.version == 2
+            && (identity.receipt_binding.is_some() || identity.owner_started.is_some()))
+        || (identity.version == 3
+            && !identity.receipt_binding.as_ref().is_some_and(|binding| {
+                binding.len() == 64
+                    && binding
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            }))
     {
         return Err("tunnel_fence_invalid");
     }
@@ -138,10 +159,18 @@ fn read(path: &Path) -> Result<Option<RunIdentity>, &'static str> {
 impl RunFence {
     pub fn acquire(root: &Path, origin: &str, tunnel: &str) -> Result<Self, &'static str> {
         let (path, lock) = lock(root, origin, tunnel)?;
+        match fs::symlink_metadata(path.with_extension("receipts")) {
+            // Legacy callers must not bypass history left by a protected run.
+            Ok(_) => return Err("tunnel_receipts_required"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err("tunnel_fence_io"),
+        }
         let identity = RunIdentity {
             version: 2,
             run_id: uuid::Uuid::new_v4().to_string(),
             owner_pid: std::process::id(),
+            receipt_binding: None,
+            owner_started: None,
         };
         let mut file = private_options()
             .create_new(true)
@@ -160,6 +189,75 @@ impl RunFence {
     }
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Recovery is admitted only for runs protected by the same durable receipt
+    /// journal. Old v2 fences have no across-restart receipts and remain blocked.
+    pub(crate) fn acquire_restartable(
+        root: &Path,
+        origin: &str,
+        tunnel: &str,
+        binding: [u8; 32],
+        owner_started: Option<u64>,
+        owner_absent: impl FnOnce(&RunIdentity) -> bool,
+    ) -> Result<(Self, Receipts), &'static str> {
+        let (path, lock) = lock(root, origin, tunnel)?;
+        let previous = read(&path)?;
+        let binding_text = format!("{:x}", Sha256::digest(binding));
+        if let Some(identity) = &previous {
+            if identity.version != 3 || identity.receipt_binding.as_ref() != Some(&binding_text) {
+                return Err("tunnel_restart_uncertain");
+            }
+            if !owner_absent(identity) {
+                return Err("tunnel_owner_active");
+            }
+        }
+        // Validate and lock the existing journal before touching a stale fence.
+        // Missing or corrupt receipt history can never authorize automatic recovery.
+        let journal = Receipts::open(
+            &path.with_extension("receipts"),
+            binding,
+            previous.is_some(),
+        )?;
+        if let Some(identity) = &previous {
+            let directory = root.join(format!(
+                "{}.recovered",
+                path.file_name()
+                    .ok_or("tunnel_fence_path")?
+                    .to_string_lossy()
+            ));
+            private_directory(&directory)?;
+            let archived = directory.join(&identity.run_id);
+            if fs::symlink_metadata(&archived).is_ok() {
+                return Err("tunnel_archive_exists");
+            }
+            fs::rename(&path, archived).map_err(|_| "tunnel_fence_io")?;
+            sync_directory(&directory)?;
+        }
+        let identity = RunIdentity {
+            version: 3,
+            run_id: uuid::Uuid::new_v4().to_string(),
+            owner_pid: std::process::id(),
+            receipt_binding: Some(binding_text),
+            owner_started,
+        };
+        let mut file = private_options()
+            .create_new(true)
+            .open(&path)
+            .map_err(|_| "tunnel_restart_uncertain")?;
+        let bytes = serde_json::to_vec(&identity).map_err(|_| "tunnel_fence_io")?;
+        file.write_all(&bytes)
+            .and_then(|_| file.sync_all())
+            .map_err(|_| "tunnel_fence_io")?;
+        sync_directory(root)?;
+        Ok((
+            Self {
+                path,
+                identity,
+                _lock: lock,
+            },
+            journal,
+        ))
     }
     /// Only call after observing the owned task complete without uncertain work.
     pub fn finish(&self) -> Result<(), &'static str> {

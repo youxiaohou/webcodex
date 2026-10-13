@@ -80,6 +80,33 @@ fn diagnostics_do_not_contain_authority_material() {
     }
 }
 
+#[test]
+fn automatic_recovery_never_treats_the_live_host_or_zero_pid_as_absent() {
+    let mut identity = webcodex_openai_tunnel::run_fence::RunIdentity {
+        version: 3,
+        run_id: uuid::Uuid::new_v4().to_string(),
+        owner_pid: 0,
+        receipt_binding: Some("0".repeat(64)),
+        owner_started: current_owner_started(),
+    };
+    assert!(!owner_absent(&identity));
+    identity.owner_pid = std::process::id();
+    assert!(!owner_absent(&identity));
+    #[cfg(windows)]
+    {
+        let started = identity
+            .owner_started
+            .expect("Windows process creation time");
+        identity.owner_started = Some(started + 1);
+        assert!(
+            owner_absent(&identity),
+            "a reused PID is a different process instance"
+        );
+        identity.owner_pid = u32::MAX;
+        assert!(owner_absent(&identity));
+    }
+}
+
 // Dedicated adapter lifecycle fixture. The crate's domain tests own wire behavior.
 async fn pending_tunnel(root: &Path) -> (OpenAiTunnel, tokio::net::TcpStream) {
     use tokio::io::AsyncReadExt;
