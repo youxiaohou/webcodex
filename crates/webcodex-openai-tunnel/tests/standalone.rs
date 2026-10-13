@@ -9,6 +9,12 @@ use tokio::{
 };
 use webcodex_openai_tunnel::HealthSnapshot;
 
+fn temp_root() -> tempfile::TempDir {
+    // Keep the production no-symlink fence, including for not-yet-created child
+    // paths. macOS commonly spells its temporary root through /var's symlink.
+    tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap()
+}
+
 fn cli() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_webcodex-tunnel"));
     // Never use workstation credentials or route fixture traffic through its proxy.
@@ -144,7 +150,7 @@ fn no_secret(output: &std::process::Output) {
 async fn doctor_help_and_version_do_not_need_network_or_create_state() {
     let cp = Server::new().await;
     let mcp = Server::new().await;
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_root();
     let root = tmp.path().join("unused");
     for flag in ["--help", "--version"] {
         assert!(cli().arg(flag).output().await.unwrap().status.success());
@@ -172,7 +178,7 @@ async fn doctor_help_and_version_do_not_need_network_or_create_state() {
 async fn standalone_forwards_without_local_auth_and_reports_status_then_stops_cleanly() {
     let mut cp = Server::new().await;
     let mut mcp = Server::new().await;
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_root();
     let mut command = configured(&cp, &mcp, tmp.path());
     let mut polls = Polls::start(&mut cp, vec![json!([command_for_test()])]);
     let (child, address) = launch(&mut command).await;
@@ -212,7 +218,7 @@ fn command_for_test() -> Value {
 async fn local_health_is_passive_and_second_owner_is_refused() {
     let mut cp = Server::new().await;
     let mut mcp = Server::new().await;
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_root();
     let (child, address) = launch(&mut configured(&cp, &mcp, tmp.path())).await;
     let held_poll = cp.next().await;
     assert_eq!(
@@ -274,7 +280,7 @@ async fn local_health_is_passive_and_second_owner_is_refused() {
 async fn interrupted_effect_retains_restart_latch_and_cannot_dispatch_again() {
     let mut cp = Server::new().await;
     let mut mcp = Server::new().await;
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_root();
     let mut command = configured(&cp, &mcp, tmp.path());
     let _polls = Polls::start(&mut cp, vec![json!([command_for_test()])]);
     let (child, _address) = launch(&mut command).await;
@@ -294,7 +300,7 @@ async fn interrupted_effect_retains_restart_latch_and_cannot_dispatch_again() {
 async fn explicit_file_authorization_only_reaches_the_local_target() {
     let mut cp = Server::new().await;
     let mut mcp = Server::new().await;
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_root();
     let secret = tmp.path().join("local-auth");
     std::fs::write(&secret, "Bearer local-secret\n").unwrap();
     let root = tmp.path().join("runs");

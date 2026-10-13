@@ -88,15 +88,15 @@ async fn abrupt_owner_loss_restarts_polling_without_replaying_the_old_effect() {
     poll.respond(200, &json!({"commands":[command("old")]}).to_string());
     let old_effect = mcp.next().await;
     assert_eq!(old_effect.json()["id"], "old");
+    // Hold the old owner's outstanding poll before cancellation. Otherwise its
+    // late arrival can consume the new owner's command batch in this fixture.
+    let old_poll = cp.next().await;
     // Effect reached MCP, but its terminal result was never observed by Tunnel.
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());
     old_effect.disconnect();
+    old_poll.disconnect();
     drop(guard);
-    // Dispose the cancelled owner's outstanding poll before the new fixture.
-    while let Ok(request) = cp.requests.try_recv() {
-        request.respond(204, "");
-    }
     let (next, guard) = client(&cp, &mcp, Limits::default(), DeadlinePolicy::default())
         .with_restart_recovery(&root, None, |_| true)
         .unwrap();
