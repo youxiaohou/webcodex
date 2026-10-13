@@ -81,7 +81,13 @@ impl OpenAiTunnel {
         .map_err(tunnel_error)?;
         let (client, guard) = client
             .with_restart_recovery(&guard_root()?, current_owner_started(), owner_absent)
-            .map_err(|_| tunnel_error(Error::Uncertain))?;
+            .map_err(|code| {
+                tunnel_error(if code == "tunnel_archive_capacity" {
+                    Error::Capacity
+                } else {
+                    Error::Uncertain
+                })
+            })?;
         let health = client.health();
         let (stop, rx) = oneshot::channel();
         let task = tokio::spawn(client.run(async {

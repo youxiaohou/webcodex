@@ -289,3 +289,236 @@ fn protected_run_retains_the_exact_process_instance_for_reboot_pid_reuse() {
     );
     next.finish().unwrap();
 }
+
+#[test]
+fn lost_receipts_after_clean_stop_never_reset_protected_history() {
+    let temp = root();
+    let root = temp.path().canonicalize().unwrap();
+    let (owner, receipts) = restartable(&root, ORIGIN, "first", [1; 32], |_| true).unwrap();
+    let path = owner.path().to_owned();
+    assert!(receipts.claim("already-dispatched").unwrap());
+    owner.finish().unwrap();
+    drop(receipts);
+    drop(owner);
+    fs::remove_file(path.with_extension("receipts")).unwrap();
+    let lock_path = path.with_extension("lock");
+    let history = fs::read(&lock_path).unwrap();
+    assert!(matches!(
+        restartable(&root, ORIGIN, "first", [1; 32], |_| true),
+        Err("tunnel_receipts_missing")
+    ));
+    assert!(!path.exists());
+    assert!(!path.with_extension("receipts").exists());
+    assert_eq!(fs::read(lock_path).unwrap(), history);
+    assert_eq!(
+        RunFence::acquire(&root, ORIGIN, "first").unwrap_err(),
+        "tunnel_receipts_required"
+    );
+}
+
+#[test]
+fn automatic_archive_count_exhaustion_preserves_all_history() {
+    let temp = root();
+    let root = temp.path().canonicalize().unwrap();
+    let (mut owner, mut receipts) = restartable(&root, ORIGIN, "first", [1; 32], |_| true).unwrap();
+    for _ in 0..128 {
+        drop(receipts);
+        drop(owner);
+        (owner, receipts) = restartable(&root, ORIGIN, "first", [1; 32], |_| true).unwrap();
+    }
+    let path = owner.path().to_owned();
+    let active = fs::read(&path).unwrap();
+    drop(receipts);
+    drop(owner);
+    // Budget rejection must happen before journal validation can trim a tail.
+    use std::io::{Seek, SeekFrom};
+    let journal = path.with_extension("receipts");
+    let mut file = private_options().open(&journal).unwrap();
+    file.seek(SeekFrom::End(0)).unwrap();
+    file.write_all(&[0; 17]).unwrap();
+    drop(file);
+    let receipt_bytes = fs::read(&journal).unwrap();
+    let history = fs::read(path.with_extension("lock")).unwrap();
+    assert!(matches!(
+        restartable(&root, ORIGIN, "first", [1; 32], |_| true),
+        Err("tunnel_archive_capacity")
+    ));
+    assert_eq!(fs::read(&path).unwrap(), active);
+    assert_eq!(fs::read(journal).unwrap(), receipt_bytes);
+    assert_eq!(fs::read(path.with_extension("lock")).unwrap(), history);
+    assert_eq!(
+        fs::read_dir(root.join(format!(
+            "{}.recovered",
+            path.file_name().unwrap().to_string_lossy()
+        )))
+        .unwrap()
+        .count(),
+        128
+    );
+}
+
+#[test]
+fn missing_or_corrupt_protection_after_clean_stop_preserves_receipts() {
+    for corrupt in [false, true] {
+        let temp = root();
+        let root = temp.path().canonicalize().unwrap();
+        let (owner, receipts) = restartable(&root, ORIGIN, "first", [1; 32], |_| true).unwrap();
+        let path = owner.path().to_owned();
+        assert!(receipts.claim("already-dispatched").unwrap());
+        owner.finish().unwrap();
+        drop(receipts);
+        drop(owner);
+        let journal = path.with_extension("receipts");
+        let receipt_bytes = fs::read(&journal).unwrap();
+        let lock_path = path.with_extension("lock");
+        let mut history = fs::read(&lock_path).unwrap();
+        if corrupt {
+            history[0] ^= 1;
+        } else {
+            history.clear();
+        }
+        let mut file = private_options().truncate(true).open(&lock_path).unwrap();
+        file.write_all(&history).unwrap();
+        drop(file);
+        let expected = if corrupt {
+            "tunnel_protected_history_invalid"
+        } else {
+            "tunnel_protected_history_missing"
+        };
+        assert!(
+            matches!(restartable(&root, ORIGIN, "first", [1; 32], |_| true), Err(code) if code == expected)
+        );
+        assert!(!path.exists());
+        assert_eq!(fs::read(journal).unwrap(), receipt_bytes);
+        assert_eq!(fs::read(lock_path).unwrap(), history);
+        assert!(RunFence::acquire(&root, ORIGIN, "first").is_err());
+    }
+}
+
+#[test]
+fn clean_protection_cannot_be_rebound_to_a_new_target() {
+    let temp = root();
+    let root = temp.path().canonicalize().unwrap();
+    let (owner, receipts) = restartable(&root, ORIGIN, "first", [1; 32], |_| true).unwrap();
+    let path = owner.path().to_owned();
+    assert!(receipts.claim("already-dispatched").unwrap());
+    owner.finish().unwrap();
+    drop(receipts);
+    drop(owner);
+    let journal = fs::read(path.with_extension("receipts")).unwrap();
+    let history = fs::read(path.with_extension("lock")).unwrap();
+    assert!(matches!(
+        restartable(&root, ORIGIN, "first", [2; 32], |_| true),
+        Err("tunnel_protected_history_binding_changed")
+    ));
+    assert!(!path.exists());
+    assert_eq!(fs::read(path.with_extension("receipts")).unwrap(), journal);
+    assert_eq!(fs::read(path.with_extension("lock")).unwrap(), history);
+}
+
+#[test]
+fn interrupted_protection_initialization_never_reseeds_a_journal() {
+    for complete in [false, true] {
+        let temp = root();
+        let root = temp.path().canonicalize().unwrap();
+        let (path, mut lock) = lock(&root, ORIGIN, "first").unwrap();
+        if complete {
+            initialize_protected_history(&mut lock, [1; 32], &root).unwrap();
+        } else {
+            lock.write_all(b"WCTHST01partial").unwrap();
+            lock.sync_all().unwrap();
+        }
+        drop(lock);
+        let history = fs::read(path.with_extension("lock")).unwrap();
+        let expected = if complete {
+            "tunnel_receipts_missing"
+        } else {
+            "tunnel_protected_history_invalid"
+        };
+        assert!(
+            matches!(restartable(&root, ORIGIN, "first", [1; 32], |_| true), Err(code) if code == expected)
+        );
+        assert!(!path.exists());
+        assert!(!path.with_extension("receipts").exists());
+        assert_eq!(fs::read(path.with_extension("lock")).unwrap(), history);
+        assert!(RunFence::acquire(&root, ORIGIN, "first").is_err());
+    }
+}
+
+#[test]
+fn automatic_archive_byte_exhaustion_preserves_active_receipts_and_archives() {
+    let temp = root();
+    let root = temp.path().canonicalize().unwrap();
+    let (owner, receipts) = restartable(&root, ORIGIN, "first", [1; 32], |_| true).unwrap();
+    assert!(receipts.claim("already-dispatched").unwrap());
+    let path = owner.path().to_owned();
+    let active = fs::read(&path).unwrap();
+    let identity = observe(&root, ORIGIN, "first").unwrap().unwrap();
+    drop(receipts);
+    drop(owner);
+    let journal = fs::read(path.with_extension("receipts")).unwrap();
+    let history = fs::read(path.with_extension("lock")).unwrap();
+    let directory = root.join(format!(
+        "{}.recovered",
+        path.file_name().unwrap().to_string_lossy()
+    ));
+    private_directory(&directory).unwrap();
+    let mut archives = Vec::new();
+    // Legal 4-KiB marker records fill the byte budget before the count budget.
+    for _ in 0..16 {
+        let mut saved = identity.clone();
+        saved.run_id = uuid::Uuid::new_v4().to_string();
+        let archive = directory.join(&saved.run_id);
+        let mut bytes = serde_json::to_vec(&saved).unwrap();
+        bytes.resize(4096, b' ');
+        let mut file = private_options().create_new(true).open(&archive).unwrap();
+        file.write_all(&bytes).unwrap();
+        drop(file);
+        archives.push((archive, bytes));
+    }
+    assert!(matches!(
+        restartable(&root, ORIGIN, "first", [1; 32], |_| true),
+        Err("tunnel_archive_capacity")
+    ));
+    assert_eq!(fs::read(path.with_extension("receipts")).unwrap(), journal);
+    assert_eq!(fs::read(path.with_extension("lock")).unwrap(), history);
+    assert_eq!(fs::read(&path).unwrap(), active);
+    assert!(!directory.join(&identity.run_id).exists());
+    for (archive, bytes) in archives {
+        assert_eq!(fs::read(archive).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn invalid_archive_entries_do_not_mutate_protected_state() {
+    for oversized in [false, true] {
+        let temp = root();
+        let root = temp.path().canonicalize().unwrap();
+        let (owner, receipts) = restartable(&root, ORIGIN, "first", [1; 32], |_| true).unwrap();
+        let path = owner.path().to_owned();
+        let active = fs::read(&path).unwrap();
+        drop(receipts);
+        drop(owner);
+        let journal = fs::read(path.with_extension("receipts")).unwrap();
+        let history = fs::read(path.with_extension("lock")).unwrap();
+        let directory = root.join(format!(
+            "{}.recovered",
+            path.file_name().unwrap().to_string_lossy()
+        ));
+        private_directory(&directory).unwrap();
+        let invalid = directory.join("invalid");
+        if oversized {
+            let file = private_options().create_new(true).open(invalid).unwrap();
+            file.set_len(4097).unwrap();
+        } else {
+            fs::create_dir(invalid).unwrap();
+        }
+        assert!(matches!(
+            restartable(&root, ORIGIN, "first", [1; 32], |_| true),
+            Err("tunnel_archive_invalid")
+        ));
+        assert_eq!(fs::read(path.with_extension("receipts")).unwrap(), journal);
+        assert_eq!(fs::read(path.with_extension("lock")).unwrap(), history);
+        assert_eq!(fs::read(&path).unwrap(), active);
+    }
+}

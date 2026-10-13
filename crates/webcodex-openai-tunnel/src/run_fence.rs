@@ -4,13 +4,19 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},
-    io::{Read, Write},
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
 
 #[path = "run_receipts.rs"]
 mod receipts;
 pub(crate) use receipts::Receipts;
+
+const PROTECTED_HISTORY_MAGIC: &[u8; 8] = b"WCTHST01";
+const PROTECTED_HISTORY_BYTES: usize = 72;
+const MAX_AUTO_ARCHIVES: usize = 128;
+const MAX_AUTO_ARCHIVE_BYTES: u64 = 64 * 1024;
+const MAX_RUN_MARKER_BYTES: u64 = 4096;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -106,13 +112,103 @@ fn lock(root: &Path, origin: &str, tunnel: &str) -> Result<(PathBuf, File), &'st
         .map_err(|_| "tunnel_owner_active")?;
     Ok((path, file))
 }
+
+/// The lock file survives clean stops. Its immutable protected-history header
+/// distinguishes a fresh store from missing receipts even without an active run.
+fn protected_binding(lock: &mut File) -> Result<Option<[u8; 32]>, &'static str> {
+    let length = lock.metadata().map_err(|_| "tunnel_fence_io")?.len();
+    if length == 0 {
+        return Ok(None);
+    }
+    if length != PROTECTED_HISTORY_BYTES as u64 {
+        return Err("tunnel_protected_history_invalid");
+    }
+    lock.seek(SeekFrom::Start(0))
+        .map_err(|_| "tunnel_fence_io")?;
+    let mut header = [0; PROTECTED_HISTORY_BYTES];
+    lock.read_exact(&mut header)
+        .map_err(|_| "tunnel_fence_io")?;
+    if &header[..8] != PROTECTED_HISTORY_MAGIC
+        || Sha256::digest(&header[..40]).as_slice() != &header[40..]
+    {
+        return Err("tunnel_protected_history_invalid");
+    }
+    Ok(Some(
+        header[8..40]
+            .try_into()
+            .map_err(|_| "tunnel_protected_history_invalid")?,
+    ))
+}
+
+fn initialize_protected_history(
+    lock: &mut File,
+    binding: [u8; 32],
+    root: &Path,
+) -> Result<(), &'static str> {
+    let mut header = [0; PROTECTED_HISTORY_BYTES];
+    header[..8].copy_from_slice(PROTECTED_HISTORY_MAGIC);
+    header[8..40].copy_from_slice(&binding);
+    let checksum = Sha256::digest(&header[..40]);
+    header[40..].copy_from_slice(&checksum);
+    lock.seek(SeekFrom::Start(0))
+        .map_err(|_| "tunnel_fence_io")?;
+    lock.write_all(&header)
+        .and_then(|_| lock.sync_all())
+        .map_err(|_| "tunnel_fence_io")?;
+    sync_directory(root)
+}
+
+fn missing(path: &Path) -> Result<bool, &'static str> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(false),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(_) => Err("tunnel_fence_io"),
+    }
+}
+
+/// Read at most the count budget, rejecting unknown file kinds and oversized
+/// markers. This preflight runs before journal repair or any history mutation.
+fn check_auto_archive_budget(directory: &Path, incoming: u64) -> Result<(), &'static str> {
+    if incoming > MAX_RUN_MARKER_BYTES {
+        return Err("tunnel_archive_invalid");
+    }
+    let meta = match fs::symlink_metadata(directory) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err("tunnel_fence_io"),
+    };
+    if !meta.is_dir() || meta.file_type().is_symlink() {
+        return Err("tunnel_archive_invalid");
+    }
+    let entries = fs::read_dir(directory).map_err(|_| "tunnel_fence_io")?;
+    let mut count = 0usize;
+    let mut bytes = incoming;
+    for entry in entries {
+        let entry = entry.map_err(|_| "tunnel_fence_io")?;
+        count += 1;
+        if count >= MAX_AUTO_ARCHIVES {
+            return Err("tunnel_archive_capacity");
+        }
+        let meta = fs::symlink_metadata(entry.path()).map_err(|_| "tunnel_fence_io")?;
+        if !meta.is_file() || meta.file_type().is_symlink() || meta.len() > MAX_RUN_MARKER_BYTES {
+            return Err("tunnel_archive_invalid");
+        }
+        bytes = bytes
+            .checked_add(meta.len())
+            .ok_or("tunnel_archive_capacity")?;
+        if bytes > MAX_AUTO_ARCHIVE_BYTES {
+            return Err("tunnel_archive_capacity");
+        }
+    }
+    Ok(())
+}
 fn read(path: &Path) -> Result<Option<RunIdentity>, &'static str> {
     let meta = match fs::symlink_metadata(path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(_) => return Err("tunnel_fence_io"),
         Ok(meta) => meta,
     };
-    if !meta.is_file() || meta.file_type().is_symlink() || meta.len() > 4096 {
+    if !meta.is_file() || meta.file_type().is_symlink() || meta.len() > MAX_RUN_MARKER_BYTES {
         return Err("tunnel_fence_invalid");
     }
     #[cfg(unix)]
@@ -158,7 +254,10 @@ fn read(path: &Path) -> Result<Option<RunIdentity>, &'static str> {
 }
 impl RunFence {
     pub fn acquire(root: &Path, origin: &str, tunnel: &str) -> Result<Self, &'static str> {
-        let (path, lock) = lock(root, origin, tunnel)?;
+        let (path, mut lock) = lock(root, origin, tunnel)?;
+        if protected_binding(&mut lock)?.is_some() {
+            return Err("tunnel_receipts_required");
+        }
         match fs::symlink_metadata(path.with_extension("receipts")) {
             // Legacy callers must not bypass history left by a protected run.
             Ok(_) => return Err("tunnel_receipts_required"),
@@ -201,7 +300,7 @@ impl RunFence {
         owner_started: Option<u64>,
         owner_absent: impl FnOnce(&RunIdentity) -> bool,
     ) -> Result<(Self, Receipts), &'static str> {
-        let (path, lock) = lock(root, origin, tunnel)?;
+        let (path, mut lock) = lock(root, origin, tunnel)?;
         let previous = read(&path)?;
         let binding_text = format!("{:x}", Sha256::digest(binding));
         if let Some(identity) = &previous {
@@ -212,25 +311,48 @@ impl RunFence {
                 return Err("tunnel_owner_active");
             }
         }
-        // Validate and lock the existing journal before touching a stale fence.
-        // Missing or corrupt receipt history can never authorize automatic recovery.
-        let journal = Receipts::open(
-            &path.with_extension("receipts"),
-            binding,
-            previous.is_some(),
-        )?;
-        if let Some(identity) = &previous {
-            let directory = root.join(format!(
-                "{}.recovered",
-                path.file_name()
-                    .ok_or("tunnel_fence_path")?
-                    .to_string_lossy()
-            ));
-            private_directory(&directory)?;
+        let journal_path = path.with_extension("receipts");
+        let directory = root.join(format!(
+            "{}.recovered",
+            path.file_name()
+                .ok_or("tunnel_fence_path")?
+                .to_string_lossy()
+        ));
+        let history = protected_binding(&mut lock)?;
+        let initialize = match history {
+            Some(saved) if saved == binding => false,
+            Some(_) => return Err("tunnel_protected_history_binding_changed"),
+            None => {
+                // Surviving protected evidence cannot become a fresh namespace
+                // just because one independent state file was lost/restored.
+                if previous.is_some() || !missing(&journal_path)? || !missing(&directory)? {
+                    return Err("tunnel_protected_history_missing");
+                }
+                true
+            }
+        };
+        let archived = if let Some(identity) = &previous {
             let archived = directory.join(&identity.run_id);
-            if fs::symlink_metadata(&archived).is_ok() {
+            if !missing(&archived)? {
                 return Err("tunnel_archive_exists");
             }
+            let incoming = fs::symlink_metadata(&path)
+                .map_err(|_| "tunnel_fence_io")?
+                .len();
+            check_auto_archive_budget(&directory, incoming)?;
+            Some(archived)
+        } else {
+            None
+        };
+        if initialize {
+            // Publish permanent protection before journal creation/admission.
+            // Interrupted initialization stays blocked; it never reseeds history.
+            initialize_protected_history(&mut lock, binding, root)?;
+        }
+        // Existing protection requires receipts after *both* clean and dirty stops.
+        let journal = Receipts::open(&journal_path, binding, !initialize)?;
+        if let Some(archived) = archived {
+            private_directory(&directory)?;
             fs::rename(&path, archived).map_err(|_| "tunnel_fence_io")?;
             sync_directory(&directory)?;
         }

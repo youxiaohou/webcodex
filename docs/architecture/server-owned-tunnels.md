@@ -146,6 +146,21 @@ On Windows, the v3 marker also records process creation time. A reused PID after
 reboot is not mistaken for the old owner; inaccessible or unobservable process
 state still cannot authorize recovery.
 
+The immutable protected-history header lives in the per-Tunnel lock file,
+independently of `.active`, and survives clean stops. It is synced before the
+first journal can be created or any request admitted. Existing protection makes
+receipt history mandatory on every later start. Missing/corrupt protection with
+surviving state, interrupted initialization and changed bindings remain blocked;
+they never become fresh admission authority. Valid older-journal restore and
+complete private-state rollback are outside this local guarantee; protected files
+must not be restored independently.
+
+Automatic archival is limited to 128 files and 64 KiB of marker contents per
+Tunnel, with a 4-KiB per-marker bound. A bounded, read-only preflight checks the
+budget before receipt-tail repair or active-marker movement. Exhaustion reports
+capacity failure and preserves the active marker, receipts, permanent protection
+and archives; no forensic history is automatically deleted.
+
 Legacy v2 markers without durable receipts still require explicit operator
 reconciliation. Missing/corrupt journals, changed bindings, live/unknown owners
 and exhausted receipt capacity fail closed. Receipts are never automatically

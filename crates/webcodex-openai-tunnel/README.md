@@ -170,9 +170,27 @@ reset; capacity exhaustion fails closed. An incomplete final append is removed
 because local dispatch requires a completed, synced admission first. These
 durability guarantees rely on the filesystem honoring sync operations.
 
+The per-Tunnel `.lock` file also contains an immutable, checksummed 72-byte
+protected-history header. It is synced before first journal creation and is
+never removed on clean stop. Once that header exists, missing receipts block
+startup even when `.active` is absent. A missing/empty protection header with
+surviving receipts, an active protected run or recovered-marker directory also
+blocks initialization; corrupt headers and changed bindings are not rewritten.
+An interrupted first initialization stays blocked rather than reseeding history.
+State rollback is outside this local guarantee: restoring an older valid journal
+can discard admissions without violating its checksums. Do not restore protected
+files independently. Losing the entire private namespace cannot be distinguished
+from a fresh namespace without an external trust anchor.
+
+Automatic recovery retains at most 128 archived run markers and 64 KiB of marker
+contents per Tunnel, with a 4-KiB limit per marker. Its bounded preflight rejects
+invalid archive entries and exhausted budgets before journal repair or marker
+movement. No archive is automatically evicted: the active marker, receipts and
+permanent protection remain intact for operator reconciliation when full.
+
 The default library constructor and standalone CLI retain manual recovery for
 unprotected runs. The legacy guard API cannot reopen a protected receipt store.
-Do not downgrade, delete receipt history, switch hosts or change state roots to
+Do not downgrade, delete receipt/protection history, switch hosts or change state roots to
 bypass replay protection. Restored connection readiness does not settle an old
 task's unknown result; archived run markers remain available for reconciliation.
 
