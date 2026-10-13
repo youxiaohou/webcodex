@@ -1,7 +1,9 @@
 use super::ProductError;
+#[cfg(test)]
+use std::path::Path;
 use std::{
     future::Future,
-    path::{Path, PathBuf},
+    path::PathBuf,
     time::{Duration, Instant},
 };
 use tokio::{sync::oneshot, task::JoinHandle};
@@ -77,7 +79,9 @@ impl OpenAiTunnel {
             prerequisites.proxy.clone(),
         )
         .map_err(tunnel_error)?;
-        let guard = acquire_guard(&guard_root()?, &prerequisites.tunnel_id)?;
+        let (client, guard) = client
+            .with_restart_recovery(&guard_root()?, current_owner_started(), owner_absent)
+            .map_err(|_| tunnel_error(Error::Uncertain))?;
         let health = client.health();
         let (stop, rx) = oneshot::channel();
         let task = tokio::spawn(client.run(async {
@@ -299,12 +303,98 @@ fn guard_root() -> Result<PathBuf, ProductError> {
     webcodex_openai_tunnel::run_fence::default_root()
         .map_err(|_| tunnel_error(Error::Configuration))
 }
+#[cfg(test)]
 fn acquire_guard(
     root: &Path,
     tunnel: &str,
 ) -> Result<webcodex_openai_tunnel::run_fence::RunFence, ProductError> {
     webcodex_openai_tunnel::run_fence::RunFence::acquire(root, CONTROL_PLANE, tunnel)
         .map_err(|_| tunnel_error(Error::Uncertain))
+}
+
+fn current_owner_started() -> Option<u64> {
+    #[cfg(windows)]
+    {
+        process_instance(std::process::id()).ok().flatten()
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
+fn owner_absent(identity: &webcodex_openai_tunnel::run_fence::RunIdentity) -> bool {
+    let pid = identity.owner_pid;
+    if pid == 0 {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        match process_instance(pid) {
+            Ok(None) => true,
+            // A reboot can reuse a PID. Its creation time proves that the old
+            // process instance is gone without stopping the replacement process.
+            Ok(Some(started)) => identity.owner_started.is_some_and(|old| old != started),
+            Err(()) => false,
+        }
+    }
+    #[cfg(unix)]
+    {
+        let Ok(pid) = i32::try_from(pid) else {
+            return false;
+        };
+        unsafe {
+            libc::kill(pid, 0) == -1
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+        }
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        false
+    }
+}
+
+#[cfg(windows)]
+fn process_instance(pid: u32) -> Result<Option<u64>, ()> {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, GetLastError, ERROR_INVALID_PARAMETER, FILETIME, STILL_ACTIVE},
+        System::Threading::{
+            GetExitCodeProcess, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        },
+    };
+    // Denied access or failed observations are unknown, never proof of exit.
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return if GetLastError() == ERROR_INVALID_PARAMETER {
+                Ok(None)
+            } else {
+                Err(())
+            };
+        }
+        let mut code = STILL_ACTIVE as u32;
+        if GetExitCodeProcess(handle, &mut code) == 0 {
+            CloseHandle(handle);
+            return Err(());
+        }
+        if code != STILL_ACTIVE as u32 {
+            CloseHandle(handle);
+            return Ok(None);
+        }
+        let mut created: FILETIME = std::mem::zeroed();
+        let mut exited: FILETIME = std::mem::zeroed();
+        let mut kernel: FILETIME = std::mem::zeroed();
+        let mut user: FILETIME = std::mem::zeroed();
+        let observed =
+            GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user) != 0;
+        CloseHandle(handle);
+        let started = (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime);
+        if observed && started != 0 {
+            Ok(Some(started))
+        } else {
+            Err(())
+        }
+    }
 }
 fn missing_configuration() -> ProductError {
     ProductError::new(
@@ -322,7 +412,7 @@ fn tunnel_error(error: Error) -> ProductError {
         _ => "tunnel_protocol_failed",
     };
     ProductError::new(code, error.to_string(), Some(match error {
-        Error::Uncertain => "Do not automatically restart. Use environment recover-tunnel with the exact Environment and Profile to diagnose the fence. Resolve prior effects and pending work before explicit recovery; legacy ownerless fences remain blocked.",
+        Error::Uncertain => "Do not replay unconfirmed effects. Protected runs can reconnect after their old process exits with intact durable receipts; legacy fences, changed bindings, missing or corrupt receipt history still require explicit reconciliation. Use environment recover-tunnel with the exact Environment and Profile to diagnose the fence.",
         _ => "Check the fixed local MCP endpoint, Tunnel runtime credential and control-plane connectivity.",
     }))
 }

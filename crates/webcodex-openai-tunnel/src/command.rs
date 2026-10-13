@@ -116,6 +116,12 @@ impl TunnelClient {
         if deadline.is_some_and(|d| d <= Instant::now()) {
             return Ok(());
         }
+        if let Some(receipts) = &self.receipts {
+            if !receipts.claim(&command.request_id)? {
+                self.health.0.rejected.fetch_add(1, Ordering::Relaxed);
+                return Ok(());
+            }
+        }
         // The only dispatch entry; all retry loops are strictly downstream of it.
         let operation = self.forward(&command);
         let result = match deadline {

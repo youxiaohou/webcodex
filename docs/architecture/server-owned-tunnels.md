@@ -132,8 +132,25 @@ Wire command/response schemas, status acknowledgement rules and standalone
 `ProtocolCompatible` deadline semantics are unchanged. Embedded WebCodex continues
 to require finite command deadlines, capped at 120 seconds. No command is locally
 replayed after possible dispatch. A response retry is not an MCP execution retry.
-An uncertain marker requires operator reconciliation, never an automatic cleanup
-intended to make restart appear successful.
+The local/embedded OpenAI adapter enables durable request admission before local
+dispatch. Its v3 fence binds the same control-plane origin, Tunnel, local MCP URL
+and local credential to a checksummed receipt journal. After the old process is
+definitely absent, it validates the journal and archives the exact stale run
+under the ownership lock before starting another run. Previously admitted
+request IDs are suppressed across both clean and abrupt restarts. Old task
+results remain unconfirmed; automatic connection recovery never replays an old
+effect or claims successful completion. Retries with a new request ID are not
+covered by this guarantee.
+
+On Windows, the v3 marker also records process creation time. A reused PID after
+reboot is not mistaken for the old owner; inaccessible or unobservable process
+state still cannot authorize recovery.
+
+Legacy v2 markers without durable receipts still require explicit operator
+reconciliation. Missing/corrupt journals, changed bindings, live/unknown owners
+and exhausted receipt capacity fail closed. Receipts are never automatically
+evicted, and filesystem sync durability remains a prerequisite. The default
+library and standalone CLI retain their unprotected/manual recovery behavior.
 
 ## Focused validation
 

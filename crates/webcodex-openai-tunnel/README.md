@@ -150,15 +150,31 @@ without evicting earlier receipts. Defaults: 8 workers, 128-command burst,
 65,536 lifetime receipts, 4 MiB bodies, 1 MiB SSE events, 3 delivery attempts.
 The lifetime limit requires deliberate operational planning for long-lived use.
 
-There is no SQLite ledger and no across-restart exactly-once claim. A host must
-resolve prior effects and pending work before reconstructing a client following
-an unclean/uncertain run. WebCodex enforces this with an exclusive, synced,
-per-tunnel run marker in its private user state. It removes the marker only after
-observed shutdown with no uncertain work. Crash, aborted owner, incomplete MCP
-exchange or unconfirmed terminal delivery retains it. The marker is a coarse
-restart latch, not a distributed transaction or an execution receipt database.
-It is local to that state directory; do not run the same tunnel on another host
-or with a different state root to bypass an unresolved run.
+There is no across-restart exactly-once claim. Hosts can opt into
+`with_restart_recovery` before starting the client, retaining its returned run
+guard until execution ends. WebCodex's local/embedded OpenAI adapter does this.
+The client syncs a checksummed request-ID hash before local MCP dispatch, keeping
+the receipt after both clean and abrupt shutdown. With the same origin, Tunnel,
+local target URL and local credential, it suppresses those IDs after restart.
+It never retries an old effect or invents its result; a caller retry with a new
+request ID is a separate operation, not covered by this deduplication.
+
+Protected runs use a v3 marker. Windows owners record their process creation
+time, distinguishing a reused PID after reboot from the original process.
+A host-proven absent owner permits archival of
+that exact marker and creation of a new run, only after the existing receipt
+journal validates. Live/unknown owners, legacy v2 markers, changed bindings,
+missing journals and corrupt complete records remain blocked. The ledger holds
+at most 1,000,000 receipts (64,000,040 bytes), without eviction or automatic
+reset; capacity exhaustion fails closed. An incomplete final append is removed
+because local dispatch requires a completed, synced admission first. These
+durability guarantees rely on the filesystem honoring sync operations.
+
+The default library constructor and standalone CLI retain manual recovery for
+unprotected runs. The legacy guard API cannot reopen a protected receipt store.
+Do not downgrade, delete receipt history, switch hosts or change state roots to
+bypass replay protection. Restored connection readiness does not settle an old
+task's unknown result; archived run markers remain available for reconciliation.
 
 The library owns no background tasks. `TunnelClient::run` owns its poll and worker futures and
 cancels them on shutdown. `Health` exposes safe local observations; readiness
@@ -168,7 +184,7 @@ Hosts must monitor run completion and separately verify local MCP readiness.
 ## Scope and validation
 
 No stdio, Harpoon, Cloudflare companion, OAuth rewriting, admin UI, profiles,
-routing correction or durable dedupe. WebCodex supplies its existing authenticated
+routing correction. WebCodex supplies its existing authenticated
 MCP endpoint; this crate does not bypass runtime authorization.
 
 Run `cargo test -p webcodex-openai-tunnel`. Integration fixtures use bounded
