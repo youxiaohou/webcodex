@@ -1,9 +1,7 @@
 use super::ProductError;
-#[cfg(test)]
-use std::path::Path;
 use std::{
     future::Future,
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 use tokio::{sync::oneshot, task::JoinHandle};
@@ -14,6 +12,14 @@ use webcodex_openai_tunnel::{
 };
 
 const CONTROL_PLANE: &str = "https://api.openai.com";
+
+#[derive(Clone, Copy)]
+pub(crate) enum OpenAiTunnelRecovery {
+    Durable,
+    // Each share owns a fresh local credential. Preserve manual reconciliation
+    // after uncertainty rather than permanently binding this Tunnel to one share.
+    TemporaryShare,
+}
 
 pub(crate) struct OpenAiTunnelPrerequisites {
     pub(super) tunnel_id: String,
@@ -58,7 +64,36 @@ impl OpenAiTunnel {
         prerequisites: &OpenAiTunnelPrerequisites,
         mcp_url: &str,
         local_token: &str,
+        recovery: OpenAiTunnelRecovery,
     ) -> Result<Self, ProductError> {
+        let (client, guard) = Self::prepare_client(
+            prerequisites,
+            mcp_url,
+            local_token,
+            &guard_root()?,
+            recovery,
+        )?;
+        let health = client.health();
+        let (stop, rx) = oneshot::channel();
+        let task = tokio::spawn(client.run(async {
+            let _ = rx.await;
+        }));
+        Ok(Self {
+            task: Some(task),
+            stop: Some(stop),
+            health,
+            guard,
+            terminal: None,
+        })
+    }
+
+    fn prepare_client(
+        prerequisites: &OpenAiTunnelPrerequisites,
+        mcp_url: &str,
+        local_token: &str,
+        root: &Path,
+        recovery: OpenAiTunnelRecovery,
+    ) -> Result<(TunnelClient, webcodex_openai_tunnel::run_fence::RunFence), ProductError> {
         let mcp_url = local_mcp_url(mcp_url)?;
         let client = TunnelClient::new_with_proxy(
             ControlPlaneIdentity::new(
@@ -79,27 +114,21 @@ impl OpenAiTunnel {
             prerequisites.proxy.clone(),
         )
         .map_err(tunnel_error)?;
-        let (client, guard) = client
-            .with_restart_recovery(&guard_root()?, current_owner_started(), owner_absent)
-            .map_err(|code| {
-                tunnel_error(if code == "tunnel_archive_capacity" {
-                    Error::Capacity
-                } else {
-                    Error::Uncertain
-                })
-            })?;
-        let health = client.health();
-        let (stop, rx) = oneshot::channel();
-        let task = tokio::spawn(client.run(async {
-            let _ = rx.await;
-        }));
-        Ok(Self {
-            task: Some(task),
-            stop: Some(stop),
-            health,
-            guard,
-            terminal: None,
-        })
+        match recovery {
+            OpenAiTunnelRecovery::TemporaryShare => {
+                let guard = acquire_guard(root, &prerequisites.tunnel_id)?;
+                Ok((client, guard))
+            }
+            OpenAiTunnelRecovery::Durable => client
+                .with_restart_recovery(root, current_owner_started(), owner_absent)
+                .map_err(|code| {
+                    tunnel_error(if code == "tunnel_archive_capacity" {
+                        Error::Capacity
+                    } else {
+                        Error::Uncertain
+                    })
+                }),
+        }
     }
 
     fn completed(
@@ -206,7 +235,7 @@ fn local_mcp_url(value: &str) -> Result<String, ProductError> {
     Ok(url.to_string())
 }
 
-pub(super) async fn start_openai_tunnel(
+pub(super) async fn start_temporary_openai_tunnel(
     prerequisites: &OpenAiTunnelPrerequisites,
     mcp_url: &str,
     local_token: &str,
@@ -216,6 +245,7 @@ pub(super) async fn start_openai_tunnel(
         prerequisites,
         mcp_url,
         local_token,
+        OpenAiTunnelRecovery::TemporaryShare,
         deadline,
         std::future::pending(),
     )
@@ -229,6 +259,7 @@ pub(super) async fn start_openai_tunnel_with_stop(
     prerequisites: &OpenAiTunnelPrerequisites,
     mcp_url: &str,
     local_token: &str,
+    recovery: OpenAiTunnelRecovery,
     deadline: Instant,
     stop: impl Future<Output = ()>,
 ) -> Result<Option<OpenAiTunnel>, ProductError> {
@@ -256,7 +287,7 @@ pub(super) async fn start_openai_tunnel_with_stop(
             Some("Start the local WebCodex Server and verify its credential."),
         ));
     }
-    let tunnel = OpenAiTunnel::launch(prerequisites, &mcp_url, local_token)?;
+    let tunnel = OpenAiTunnel::launch(prerequisites, &mcp_url, local_token, recovery)?;
     finish_openai_tunnel_startup(tunnel, deadline, &mut stop).await
 }
 
@@ -309,7 +340,6 @@ fn guard_root() -> Result<PathBuf, ProductError> {
     webcodex_openai_tunnel::run_fence::default_root()
         .map_err(|_| tunnel_error(Error::Configuration))
 }
-#[cfg(test)]
 fn acquire_guard(
     root: &Path,
     tunnel: &str,

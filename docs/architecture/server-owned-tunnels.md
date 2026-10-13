@@ -150,10 +150,12 @@ The immutable protected-history header lives in the per-Tunnel lock file,
 independently of `.active`, and survives clean stops. It is synced before the
 first journal can be created or any request admitted. Existing protection makes
 receipt history mandatory on every later start. Missing/corrupt protection with
-surviving state, interrupted initialization and changed bindings remain blocked;
+surviving protected state, interrupted initialization and changed bindings remain blocked;
 they never become fresh admission authority. Valid older-journal restore and
 complete private-state rollback are outside this local guarantee; protected files
-must not be restored independently.
+must not be restored independently. A bounded directory containing only valid,
+exact v2 archives proves explicit legacy reconciliation and permits first
+initialization of protected history; empty, invalid or v3 archives do not.
 
 Automatic archival is limited to 128 files and 64 KiB of marker contents per
 Tunnel, with a 4-KiB per-marker bound. A bounded, read-only preflight checks the
@@ -165,7 +167,10 @@ Legacy v2 markers without durable receipts still require explicit operator
 reconciliation. Missing/corrupt journals, changed bindings, live/unknown owners
 and exhausted receipt capacity fail closed. Receipts are never automatically
 evicted, and filesystem sync durability remains a prerequisite. The default
-library and standalone CLI retain their unprotected/manual recovery behavior.
+library, standalone CLI and temporary `webcodex share` retain their
+unprotected/manual recovery behavior. Share credentials intentionally change on
+every invocation: a clean stop allows another share, while an uncertain share
+still requires explicit reconciliation. This never downgrades protected history.
 
 ## Focused validation
 

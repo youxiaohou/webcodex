@@ -1,6 +1,8 @@
 //! Server-owned Tunnel tasks. This is lifecycle supervision, not a second wire
 //! implementation: all profiles use the same fixed-binding TunnelClient adapter.
-use crate::project_entry::{probe_local_mcp, OpenAiTunnel, OpenAiTunnelPrerequisites};
+use crate::project_entry::{
+    probe_local_mcp, OpenAiTunnel, OpenAiTunnelPrerequisites, OpenAiTunnelRecovery,
+};
 use futures_util::{stream::FuturesUnordered, StreamExt};
 use serde::Serialize;
 use std::{
@@ -223,7 +225,12 @@ async fn run_profile(
             return;
         }
     }
-    let mut tunnel = match OpenAiTunnel::launch(&binding, &mcp_url, profile.local_token.expose()) {
+    let mut tunnel = match OpenAiTunnel::launch(
+        &binding,
+        &mcp_url,
+        profile.local_token.expose(),
+        OpenAiTunnelRecovery::Durable,
+    ) {
         Ok(tunnel) => tunnel,
         Err(error) => {
             failed(&error.code);

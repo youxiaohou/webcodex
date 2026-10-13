@@ -152,7 +152,7 @@ The lifetime limit requires deliberate operational planning for long-lived use.
 
 There is no across-restart exactly-once claim. Hosts can opt into
 `with_restart_recovery` before starting the client, retaining its returned run
-guard until execution ends. WebCodex's local/embedded OpenAI adapter does this.
+guard until execution ends. WebCodex's persistent local/embedded OpenAI adapter does this.
 The client syncs a checksummed request-ID hash before local MCP dispatch, keeping
 the receipt after both clean and abrupt shutdown. With the same origin, Tunnel,
 local target URL and local credential, it suppresses those IDs after restart.
@@ -176,6 +176,10 @@ never removed on clean stop. Once that header exists, missing receipts block
 startup even when `.active` is absent. A missing/empty protection header with
 surviving receipts, an active protected run or recovered-marker directory also
 blocks initialization; corrupt headers and changed bindings are not rewritten.
+The exception is a bounded directory containing only valid, exact v2 archives:
+these record explicit legacy reconciliation and permit first-time protection.
+Empty, invalid or v3 archives cannot authorize fresh history, including through
+the legacy guard API when other protected files are missing.
 An interrupted first initialization stays blocked rather than reseeding history.
 State rollback is outside this local guarantee: restoring an older valid journal
 can discard admissions without violating its checksums. Do not restore protected
@@ -188,8 +192,10 @@ invalid archive entries and exhausted budgets before journal repair or marker
 movement. No archive is automatically evicted: the active marker, receipts and
 permanent protection remain intact for operator reconciliation when full.
 
-The default library constructor and standalone CLI retain manual recovery for
-unprotected runs. The legacy guard API cannot reopen a protected receipt store.
+The default library constructor, standalone CLI and temporary `webcodex share`
+retain manual recovery for unprotected runs. Each share uses a new local credential;
+a clean stop permits a new share, while an uncertain stop remains fenced.
+The legacy guard API cannot reopen a protected receipt store.
 Do not downgrade, delete receipt/protection history, switch hosts or change state roots to
 bypass replay protection. Restored connection readiness does not settle an old
 task's unknown result; archived run markers remain available for reconciliation.

@@ -706,7 +706,7 @@ pub(crate) async fn share(options: &ShareCommandOptions) -> Result<(), ProductEr
     }
 
     let mut openai_tunnel = if let Some(prerequisites) = openai_prerequisites.as_ref() {
-        match super::openai_tunnel_service::start_openai_tunnel(
+        match super::openai_tunnel_service::start_temporary_openai_tunnel(
             prerequisites,
             &mcp_url(&runtime.local_url),
             &session.credential,

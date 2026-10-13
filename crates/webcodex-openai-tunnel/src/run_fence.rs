@@ -166,10 +166,25 @@ fn missing(path: &Path) -> Result<bool, &'static str> {
     }
 }
 
+fn archive_directory(path: &Path) -> Result<PathBuf, &'static str> {
+    Ok(path.with_file_name(format!(
+        "{}.recovered",
+        path.file_name()
+            .ok_or("tunnel_fence_path")?
+            .to_string_lossy()
+    )))
+}
+
 /// Read at most the count budget, rejecting unknown file kinds and oversized
 /// markers. This preflight runs before journal repair or any history mutation.
-fn check_auto_archive_budget(directory: &Path, incoming: u64) -> Result<(), &'static str> {
-    if incoming > MAX_RUN_MARKER_BYTES {
+/// With no protected header, only exact, explicitly archived v2 runs establish
+/// reconciled legacy history. Empty, mixed or protected archives remain uncertain.
+fn check_archives(
+    directory: &Path,
+    incoming: Option<u64>,
+    require_legacy: bool,
+) -> Result<(), &'static str> {
+    if incoming.is_some_and(|bytes| bytes > MAX_RUN_MARKER_BYTES) {
         return Err("tunnel_archive_invalid");
     }
     let meta = match fs::symlink_metadata(directory) {
@@ -181,12 +196,12 @@ fn check_auto_archive_budget(directory: &Path, incoming: u64) -> Result<(), &'st
         return Err("tunnel_archive_invalid");
     }
     let entries = fs::read_dir(directory).map_err(|_| "tunnel_fence_io")?;
-    let mut count = 0usize;
-    let mut bytes = incoming;
+    let mut count = usize::from(incoming.is_some());
+    let mut bytes = incoming.unwrap_or(0);
     for entry in entries {
         let entry = entry.map_err(|_| "tunnel_fence_io")?;
         count += 1;
-        if count >= MAX_AUTO_ARCHIVES {
+        if count > MAX_AUTO_ARCHIVES {
             return Err("tunnel_archive_capacity");
         }
         let meta = fs::symlink_metadata(entry.path()).map_err(|_| "tunnel_fence_io")?;
@@ -199,6 +214,18 @@ fn check_auto_archive_budget(directory: &Path, incoming: u64) -> Result<(), &'st
         if bytes > MAX_AUTO_ARCHIVE_BYTES {
             return Err("tunnel_archive_capacity");
         }
+        if require_legacy {
+            let identity = read(&entry.path())?.ok_or("tunnel_protected_history_missing")?;
+            if identity.version != 2 {
+                return Err("tunnel_protected_history_missing");
+            }
+            if entry.file_name().to_str() != Some(identity.run_id.as_str()) {
+                return Err("tunnel_archive_invalid");
+            }
+        }
+    }
+    if require_legacy && count == 0 {
+        return Err("tunnel_protected_history_missing");
     }
     Ok(())
 }
@@ -264,6 +291,7 @@ impl RunFence {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(_) => return Err("tunnel_fence_io"),
         }
+        check_archives(&archive_directory(&path)?, None, true)?;
         let identity = RunIdentity {
             version: 2,
             run_id: uuid::Uuid::new_v4().to_string(),
@@ -312,12 +340,7 @@ impl RunFence {
             }
         }
         let journal_path = path.with_extension("receipts");
-        let directory = root.join(format!(
-            "{}.recovered",
-            path.file_name()
-                .ok_or("tunnel_fence_path")?
-                .to_string_lossy()
-        ));
+        let directory = archive_directory(&path)?;
         let history = protected_binding(&mut lock)?;
         let initialize = match history {
             Some(saved) if saved == binding => false,
@@ -325,9 +348,10 @@ impl RunFence {
             None => {
                 // Surviving protected evidence cannot become a fresh namespace
                 // just because one independent state file was lost/restored.
-                if previous.is_some() || !missing(&journal_path)? || !missing(&directory)? {
+                if previous.is_some() || !missing(&journal_path)? {
                     return Err("tunnel_protected_history_missing");
                 }
+                check_archives(&directory, None, true)?;
                 true
             }
         };
@@ -339,7 +363,7 @@ impl RunFence {
             let incoming = fs::symlink_metadata(&path)
                 .map_err(|_| "tunnel_fence_io")?
                 .len();
-            check_auto_archive_budget(&directory, incoming)?;
+            check_archives(&directory, Some(incoming), false)?;
             Some(archived)
         } else {
             None
@@ -423,14 +447,7 @@ pub fn archive(
         return Err("tunnel_fence_changed");
     }
     let (path, _lock) = lock(root, origin, tunnel)?;
-    let archived = root
-        .join(format!(
-            "{}.recovered",
-            path.file_name()
-                .ok_or("tunnel_fence_path")?
-                .to_string_lossy()
-        ))
-        .join(expected_run);
+    let archived = archive_directory(&path)?.join(expected_run);
     let identity = read(&path)?.ok_or("tunnel_fence_missing")?;
     if identity.run_id != expected_run {
         return Err("tunnel_fence_changed");

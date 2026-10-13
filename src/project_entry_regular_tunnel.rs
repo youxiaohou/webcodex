@@ -1,5 +1,7 @@
 use super::client_handoff_service::{copy_text_to_clipboard, mcp_url, ClipboardCopyOutcome};
-use super::openai_tunnel_service::{prepare_openai_tunnel, start_openai_tunnel_with_stop};
+use super::openai_tunnel_service::{
+    prepare_openai_tunnel, start_openai_tunnel_with_stop, OpenAiTunnelRecovery,
+};
 use super::setup_service::create_private_dir;
 use super::ProductError;
 use serde_json::{json, Value};
@@ -79,6 +81,7 @@ async fn run_regular_server_tunnel_inner(
         &prerequisites,
         &mcp_endpoint,
         &options.bootstrap_token,
+        OpenAiTunnelRecovery::Durable,
         deadline,
         &mut stop,
     )

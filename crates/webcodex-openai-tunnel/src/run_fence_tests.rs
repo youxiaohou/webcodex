@@ -522,3 +522,72 @@ fn invalid_archive_entries_do_not_mutate_protected_state() {
         assert_eq!(fs::read(&path).unwrap(), active);
     }
 }
+
+#[test]
+fn explicitly_reconciled_legacy_runs_can_initialize_protected_history() {
+    let temp = root();
+    let root = temp.path().canonicalize().unwrap();
+    let legacy = RunFence::acquire(&root, ORIGIN, "first").unwrap();
+    let identity = observe(&root, ORIGIN, "first").unwrap().unwrap();
+    let bytes = fs::read(legacy.path()).unwrap();
+    drop(legacy);
+    let archived = archive(&root, ORIGIN, "first", &identity.run_id, |_| true).unwrap();
+    let (owner, receipts) = restartable(&root, ORIGIN, "first", [1; 32], |_| true)
+        .expect("explicitly reconciled v2 history must not prevent the first protected run");
+    assert_eq!(fs::read(archived).unwrap(), bytes);
+    assert!(receipts.claim("new-protected-request").unwrap());
+    owner.finish().unwrap();
+}
+
+#[test]
+fn surviving_protected_archives_cannot_be_reopened_by_legacy_callers() {
+    let temp = root();
+    let root = temp.path().canonicalize().unwrap();
+    let (owner, receipts) = restartable(&root, ORIGIN, "first", [1; 32], |_| true).unwrap();
+    assert!(receipts.claim("old-effect").unwrap());
+    drop(receipts);
+    drop(owner);
+    let (owner, receipts) = restartable(&root, ORIGIN, "first", [1; 32], |_| true).unwrap();
+    let path = owner.path().to_owned();
+    owner.finish().unwrap();
+    drop(receipts);
+    drop(owner);
+    fs::remove_file(path.with_extension("receipts")).unwrap();
+    private_options()
+        .truncate(true)
+        .open(path.with_extension("lock"))
+        .unwrap();
+    assert_eq!(
+        RunFence::acquire(&root, ORIGIN, "first").unwrap_err(),
+        "tunnel_protected_history_missing"
+    );
+    assert!(!path.exists());
+    assert!(matches!(
+        restartable(&root, ORIGIN, "first", [1; 32], |_| true),
+        Err("tunnel_protected_history_missing")
+    ));
+}
+
+#[test]
+fn ambiguous_legacy_archives_never_initialize_protection() {
+    for contents in [None, Some(b"invalid".as_slice())] {
+        let temp = root();
+        let root = temp.path().canonicalize().unwrap();
+        let (path, lock) = lock(&root, ORIGIN, "first").unwrap();
+        drop(lock);
+        let directory = archive_directory(&path).unwrap();
+        private_directory(&directory).unwrap();
+        if let Some(bytes) = contents {
+            let mut file = private_options()
+                .create_new(true)
+                .open(directory.join(uuid::Uuid::new_v4().to_string()))
+                .unwrap();
+            file.write_all(bytes).unwrap();
+        }
+        assert!(restartable(&root, ORIGIN, "first", [1; 32], |_| true).is_err());
+        assert!(RunFence::acquire(&root, ORIGIN, "first").is_err());
+        assert!(!path.exists());
+        assert!(!path.with_extension("receipts").exists());
+        assert!(fs::read(path.with_extension("lock")).unwrap().is_empty());
+    }
+}
