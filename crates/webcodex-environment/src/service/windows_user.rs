@@ -117,6 +117,17 @@ fn decode_running_pid(spec: &ServiceSpec, value: &Value) -> Result<Option<u32>, 
     }
 }
 
+#[cfg(any(windows, test))]
+fn decode_status_with_pid(
+    spec: &ServiceSpec,
+    value: &Value,
+) -> Result<(ServiceStatus, Option<u32>), ServiceError> {
+    Ok((
+        decode_status(spec, value)?,
+        decode_running_pid(spec, value)?,
+    ))
+}
+
 #[cfg(windows)]
 fn call_value(spec: &ServiceSpec, operation: &str) -> Result<Value, ServiceError> {
     use crate::process::CommandOutputExt;
@@ -187,6 +198,14 @@ fn call(spec: &ServiceSpec, operation: &str) -> Result<ServiceStatus, ServiceErr
 #[cfg(windows)]
 pub(super) fn running_pid(spec: &ServiceSpec) -> Result<Option<u32>, ServiceError> {
     decode_running_pid(spec, &call_value(spec, "running_pid")?)
+}
+
+#[cfg(windows)]
+pub(super) fn inspect_with_pid(
+    spec: &ServiceSpec,
+) -> Result<(ServiceStatus, Option<u32>), ServiceError> {
+    let value = call_value(spec, "running_pid")?;
+    decode_status_with_pid(spec, &value)
 }
 
 #[cfg(windows)]
@@ -288,6 +307,26 @@ mod tests {
         );
         assert!(!request.to_string().contains("--windows-service"));
     }
+    #[test]
+    fn user_task_status_and_pid_share_one_owner_checked_observation() {
+        let spec = super::super::tests::sample_spec();
+        let current = json!({
+            "exists": true, "owned": true, "enabled": true, "state": 4,
+            "process_id": 4312,
+            "instance_guid": "{723A491B-825B-4C30-BB2B-F86AA98F94AA}"
+        });
+        let (status, pid) = decode_status_with_pid(&spec, &current).unwrap();
+        assert_eq!(status.ownership, Ownership::Owned);
+        assert_eq!(status.running, Some(true));
+        assert_eq!(pid, Some(4312));
+        let mut foreign = current.clone();
+        foreign["owned"] = json!(false);
+        assert_eq!(decode_status_with_pid(&spec, &foreign).unwrap().1, None);
+        let mut invalid = current;
+        invalid["instance_guid"] = json!("unknown");
+        assert!(decode_status_with_pid(&spec, &invalid).is_err());
+    }
+
     #[test]
     fn user_task_running_pid_requires_a_live_owned_action_observation() {
         let spec = super::super::tests::sample_spec();

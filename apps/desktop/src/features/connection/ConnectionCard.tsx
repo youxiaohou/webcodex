@@ -1,3 +1,4 @@
+import { Fragment, type ReactNode } from "react";
 import { useConnectionsTools, type ConnectionsToolsKey } from "../../i18n/connections-tools";
 import { useLocale } from "../../i18n/locale";
 import { useProduct } from "../../i18n/product";
@@ -73,10 +74,42 @@ export function ConnectionCard({ profile, canStart, busy, copied, onAction, onEd
     !profile.reason_code || ["tunnel_control_plane_unreachable", "tunnel_unavailable"].includes(profile.reason_code)
   );
   const owner = serverOwned ? c("serverOwned") : c("separateService");
+  const yesNo = (value: boolean | null) => value === null ? "—" : c(value ? "yes" : "no");
+  const startup = profile.startup_timings_ms;
+  const detailRows: { label: ConnectionsToolsKey; value: ReactNode; path?: boolean }[] = [
+    { label: "connectionLifecycle", value: owner },
+    { label: "autostart", value: profile.autostart ? c("enabled") : c("disabled") },
+    { label: "profileId", value: <code>{profile.id}</code> },
+    { label: "pid", value: profile.pid ?? "—" },
+    { label: "processStarted", value: yesNo(profile.process_started) },
+    { label: "processReady", value: yesNo(profile.process_ready) },
+  ];
+  if (startup) {
+    detailRows.push(
+      { label: "cliStartup", value: `${startup.cli_total} ms` },
+      { label: "firstControlPlanePoll", value: `${startup.initial_poll} ms` },
+    );
+    if (startup.poll_attempts != null && startup.poll_request_ms != null) {
+      detailRows.push(
+        { label: "initialPollRequests", value: startup.poll_attempts },
+        { label: "pollHttpTime", value: `${startup.poll_request_ms} ms` },
+        { label: "pollRetryWait", value: `${Math.max(0, startup.initial_poll - startup.poll_request_ms)} ms` },
+      );
+    }
+    detailRows.push({ label: "otherStartupWork", value: `${startup.cli_total - startup.initial_poll} ms` });
+  }
+  detailRows.push(
+    { label: "tunnelReady", value: yesNo(profile.tunnel_ready) },
+    { label: "localMcpReady", value: yesNo(profile.local_mcp_ready) },
+  );
+  if (profile.failure_stage) detailRows.push({ label: "failureStage", value: <code>{profile.failure_stage}</code> });
+  if (profile.reason_code) detailRows.push({ label: "reasonCode", value: <code>{profile.reason_code}</code> });
+  if (profile.local_mcp_url) detailRows.push({ label: "mcpAddress", value: <code>{profile.local_mcp_url}</code>, path: true });
+  if (profile.runtime_directory) detailRows.push({ label: "runtimeDirectory", value: <code>{profile.runtime_directory}</code>, path: true });
   return <article className="connection-profile" aria-labelledby={`connection-${profile.id}`} data-tunnel-profile-id={profile.id}>
     <header className="workspace-section-heading"><div><h2 id={`connection-${profile.id}`}>{profile.name}</h2><span className="workspace-observation">{owner} · {c("secureTunnel")}</span></div><span className={`connection-state ${profile.ready ? "ready" : ""}`} role="status"><i className={`status-dot ${profile.ready ? "ready" : failed ? "error" : "unknown"}`} aria-hidden="true" />{status}</span></header>
     {(active || failed) && <dl className="connection-checks">{([[c("secureTunnel"), healthStale ? null : profile.tunnel_ready], [c("localMcp"), healthStale ? null : profile.local_mcp_ready]] as const).map(([label, ready]) => <div key={label}><dt>{label}</dt><dd><i className={`status-dot ${ready === true ? "ready" : ready === false ? "error" : "unknown"}`} aria-hidden="true" />{ready === true ? c("reachable") : ready === false ? c("unreachable") : healthStale ? c("awaitingStatus") : p("unknown")}</dd></div>)}</dl>}
-    <div className="connection-id"><span>Tunnel ID</span><code>{profile.tunnel_id || "—"}</code>{profile.tunnel_id && <button type="button" className="text-button" aria-label={`${c("copyId")} ${profile.name}`} onClick={onCopy}>{copied ? p("copied") : c("copyId")}</button>}</div>
+    <div className="connection-id"><span>{c("tunnelId")}</span><code>{profile.tunnel_id || "—"}</code>{profile.tunnel_id && <button type="button" className="text-button" aria-label={`${c("copyId")} ${profile.name}`} onClick={onCopy}>{copied ? p("copied") : c("copyId")}</button>}</div>
     {profile.server_restart_required && <div className="connection-apply-note" role="status"><strong>{c("pendingServerRestart")}</strong><span>{c("profileRestartHelp")}</span></div>}
     {failed && <div className="connection-recovery" role="status"><strong>{c(recovery.title)}</strong><p>{c(recovery.action)}</p>{autoProxyRecovery && <p>{c("autoProxyHint")}</p>}
       <button type="button" className="secondary-button" onClick={() => onSettings(recovery.settings)}>{recovery.settings === "network" ? c("proxySettings") : s(recovery.settings === "runtime" ? "Runtime" : "Troubleshooting")}</button>
@@ -91,7 +124,14 @@ export function ConnectionCard({ profile, canStart, busy, copied, onAction, onEd
     </div>
     <details className="connection-details"><summary>{p("advanced")} · {profile.name}</summary>
       {profile.credential_present && <p>{c("credentials")}</p>}
-      <dl><dt>{c("connectionLifecycle")}</dt><dd>{owner}</dd><dt>{c("autostart")}</dt><dd>{profile.autostart ? c("enabled") : c("disabled")}</dd><dt>Profile ID</dt><dd><code>{profile.id}</code></dd><dt>PID</dt><dd>{profile.pid ?? "—"}</dd><dt>Process started</dt><dd>{String(profile.process_started)}</dd><dt>Process ready</dt><dd>{String(profile.process_ready)}</dd><dt>Tunnel ready</dt><dd>{profile.tunnel_ready === null ? "—" : String(profile.tunnel_ready)}</dd><dt>Local MCP ready</dt><dd>{profile.local_mcp_ready === null ? "—" : String(profile.local_mcp_ready)}</dd>{profile.failure_stage && <><dt>Failure stage</dt><dd><code>{profile.failure_stage}</code></dd></>}{profile.reason_code && <><dt>Reason code</dt><dd><code>{profile.reason_code}</code></dd></>}{profile.local_mcp_url && <><dt>MCP</dt><dd><code>{profile.local_mcp_url}</code></dd></>}{profile.runtime_directory && <><dt>Runtime</dt><dd><code>{profile.runtime_directory}</code></dd></>}</dl>
+      <dl className="connection-meta-grid">
+        {detailRows.map(({ label, value, path }) =>
+          <Fragment key={label}>
+            <dt>{c(label)}</dt>
+            <dd className={path ? "connection-meta-path" : undefined}>{value}</dd>
+          </Fragment>
+        )}
+      </dl>
       {profile.logs.length > 0 && <><h3>{c("logs")}</h3><ol className="connection-events">{profile.logs.map((entry, index) => <li key={`${entry.timestamp_ms}-${index}`}><time>{formatTime(entry.timestamp_ms)}</time><code>{entry.event}</code></li>)}</ol></>}
     </details>
   </article>;

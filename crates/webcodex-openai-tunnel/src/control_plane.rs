@@ -57,13 +57,20 @@ impl TunnelClient {
             self.cp.origin, self.cp.tunnel
         )
     }
-    pub(crate) async fn poll(&self, limit: usize) -> Result<(Instant, Vec<Command>), PollFailure> {
+    pub(crate) async fn poll(
+        &self,
+        limit: usize,
+        startup: bool,
+    ) -> Result<(Instant, Vec<Command>), PollFailure> {
+        // OpenAI's empty long poll can hold the first ready signal for 15s.
+        // A bounded 1s initial poll still requires a real successful response.
+        let timeout_ms = if startup { "1000" } else { "15000" };
         let response = self
             .control
             .get(self.endpoint("poll"))
             .query(&[
                 ("limit", limit.min(25).to_string()),
-                ("timeout_ms", "15000".into()),
+                ("timeout_ms", timeout_ms.into()),
             ])
             .timeout(self.limits.poll_timeout)
             .send()

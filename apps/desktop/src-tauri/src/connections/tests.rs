@@ -41,6 +41,29 @@ fn root() -> PathBuf {
         .join("webcodex-connection-runtime-tests")
         .join("regular-tunnel-runtime")
 }
+#[test]
+fn startup_timings_are_bounded_and_cannot_change_readiness() {
+    assert_eq!(
+        parse_startup_timings(&json!({"cli_total":6100,"initial_poll":5100})),
+        Some(ConnectionStartupTimings { cli_total: 6100, initial_poll: 5100, poll_attempts: None, poll_request_ms: None })
+    );
+    assert_eq!(
+        parse_startup_timings(&json!({"cli_total":6100,"initial_poll":5100,"poll_attempts":1,"poll_request_ms":5000})),
+        Some(ConnectionStartupTimings { cli_total: 6100, initial_poll: 5100, poll_attempts: Some(1), poll_request_ms: Some(5000) })
+    );
+    for invalid in [
+        json!({"cli_total":10,"initial_poll":11}),
+        json!({"cli_total":76000,"initial_poll":2}),
+        json!({"cli_total":1,"initial_poll":-1}),
+        json!({"cli_total":6100,"initial_poll":5100,"poll_attempts":0,"poll_request_ms":5000}),
+        json!({"cli_total":6100,"initial_poll":5100,"poll_attempts":1,"poll_request_ms":6000}),
+        json!({"cli_total":"Bearer secret","initial_poll":5}),
+        json!(null),
+    ] {
+        assert!(parse_startup_timings(&invalid).is_none());
+    }
+}
+
 fn metadata() -> Value {
     let directory = root().join(format!("openai-{}", uuid::Uuid::new_v4().simple()));
     json!({"directory":directory, "local_mcp_url":"http://127.0.0.1:62645/mcp"})

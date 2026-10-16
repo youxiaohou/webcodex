@@ -37,6 +37,7 @@ export interface TunnelConnection {
   ready: boolean;
   process_started: boolean;
   process_ready: boolean;
+  startup_timings_ms?: { cli_total: number; initial_poll: number; poll_attempts?: number | null; poll_request_ms?: number | null } | null;
   tunnel_ready: boolean | null;
   local_mcp_ready: boolean | null;
   failure_stage: string | null;

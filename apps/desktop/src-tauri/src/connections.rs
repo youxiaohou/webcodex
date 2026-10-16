@@ -53,6 +53,38 @@ pub struct ConnectionLogEntry {
     pub timestamp_ms: u64,
     pub event: String,
 }
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConnectionStartupTimings {
+    pub cli_total: u64,
+    pub initial_poll: u64,
+    pub poll_attempts: Option<u64>,
+    pub poll_request_ms: Option<u64>,
+}
+
+fn parse_startup_timings(value: &Value) -> Option<ConnectionStartupTimings> {
+    let total = value.get("cli_total")?.as_u64()?;
+    let poll = value.get("initial_poll")?.as_u64()?;
+    if total > 75_000 || poll > total {
+        return None;
+    }
+    let details = match (
+        value.get("poll_attempts").and_then(Value::as_u64),
+        value.get("poll_request_ms").and_then(Value::as_u64),
+    ) {
+        (Some(attempts), Some(request_ms)) if (1..=128).contains(&attempts) && request_ms <= poll => {
+            (Some(attempts), Some(request_ms))
+        }
+        (None, None) => (None, None),
+        _ => return None,
+    };
+    Some(ConnectionStartupTimings {
+        cli_total: total,
+        initial_poll: poll,
+        poll_attempts: details.0,
+        poll_request_ms: details.1,
+    })
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConnectionRuntimeSnapshot {
     pub lifecycle: ConnectionLifecycle,
@@ -62,6 +94,7 @@ pub struct ConnectionRuntimeSnapshot {
     pub ready: bool,
     pub process_started: bool,
     pub process_ready: bool,
+    pub startup_timings_ms: Option<ConnectionStartupTimings>,
     pub tunnel_ready: Option<bool>,
     pub local_mcp_ready: Option<bool>,
     pub failure_stage: Option<String>,
@@ -329,11 +362,15 @@ impl ConnectionRuntimes {
                     else {
                         break ConnectionError::ProtocolInvalid;
                     };
+                    // Optional, bounded, payload-free performance evidence. An
+                    // invalid metric never changes process readiness authority.
+                    let timings = parse_startup_timings(&event["startup_timings_ms"]);
                     if !self.update(id, generation, |state| {
                         state.lifecycle = ConnectionLifecycle::Running;
                         state.runtime_directory = Some(metadata.directory);
                         state.local_mcp_url = Some(metadata.local_mcp_url);
                         state.process_ready = true;
+                        state.startup_timings_ms = timings;
                         state.failure_stage = None;
                         state.reason_code = None;
                         log(state, "process_ready");

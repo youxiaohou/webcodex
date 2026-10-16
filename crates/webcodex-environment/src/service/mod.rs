@@ -293,15 +293,37 @@ impl ServiceManager {
         platform::inspect(spec)
     }
 
+    /// Observe the owner and its live action PID in one user Task Scheduler
+    /// request. Other managers keep their platform-specific PID verification.
+    pub fn inspect_with_pid(
+        spec: &ServiceSpec,
+    ) -> Result<(ServiceStatus, Option<u32>), ServiceError> {
+        validate_spec(spec)?;
+        #[cfg(windows)]
+        if spec.scope == ServiceScope::User {
+            return windows_user::inspect_with_pid(spec);
+        }
+        let status = Self::inspect(spec)?;
+        let pid = if status.ownership == Ownership::Owned && status.running == Some(true) {
+            Self::running_pid(spec)?
+        } else {
+            None
+        };
+        Ok((status, pid))
+    }
+
     /// Current manager-owned process only. Unsupported managers fail closed.
     pub fn running_pid(spec: &ServiceSpec) -> Result<Option<u32>, ServiceError> {
+        validate_spec(spec)?;
+        #[cfg(windows)]
+        if spec.scope == ServiceScope::User {
+            // The adapter independently verifies the task and its exact live
+            // action PID; a separate inspect would spawn another PowerShell.
+            return windows_user::running_pid(spec);
+        }
         let status = Self::inspect(spec)?;
         if status.ownership != Ownership::Owned || status.running != Some(true) {
             return Ok(None);
-        }
-        #[cfg(windows)]
-        if spec.scope == ServiceScope::User {
-            return windows_user::running_pid(spec);
         }
         #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
         {

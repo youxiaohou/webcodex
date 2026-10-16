@@ -1106,7 +1106,8 @@ impl NativeEnvironment {
         } else {
             spec.clone()
         };
-        let service_status = ServiceManager::inspect(&owner_spec).map_err(service_error)?;
+        let (service_status, owner_pid) =
+            ServiceManager::inspect_with_pid(&owner_spec).map_err(service_error)?;
         let health = read_tunnel_health(&spec.working_directory.join("readiness.json")).ok();
         let owner_running =
             service_status.ownership == Ownership::Owned && service_status.running == Some(true);
@@ -1115,7 +1116,6 @@ impl NativeEnvironment {
         let server_restart_required = profile.host_mode == TunnelHostMode::Embedded
             && owner_running
             && applied_revision != Some(configured_revision);
-        let owner_pid = ServiceManager::running_pid(&owner_spec).map_err(service_error)?;
         let (tunnel_ready, local_mcp_ready) = if owner_running
             && !server_restart_required
             && owner_pid.is_some()
@@ -1790,15 +1790,17 @@ pub(crate) async fn wait_tunnel_readiness(spec: &ServiceSpec) -> SetupResultValu
             ));
         }
         if status.running == Some(true) {
-            let pid = ServiceManager::running_pid(spec).map_err(service_error)?;
             let value = read_tunnel_health(&path);
-            if value.is_ok_and(|value| {
-                pid.is_some()
-                    && value.service_pid == pid
-                    && value.tunnel_ready
-                    && value.local_mcp_ready
-            }) {
-                return Ok(());
+            if value
+                .as_ref()
+                .is_ok_and(|value| value.tunnel_ready && value.local_mcp_ready)
+            {
+                // Verify an expensive Windows user-task PID only once a ready
+                // marker is observed, still fencing it to the current owner.
+                let pid = ServiceManager::running_pid(spec).map_err(service_error)?;
+                if value.is_ok_and(|value| pid.is_some() && value.service_pid == pid) {
+                    return Ok(());
+                }
             }
         }
         if tokio::time::Instant::now() >= deadline {

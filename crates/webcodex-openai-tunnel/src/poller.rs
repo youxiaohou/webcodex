@@ -21,11 +21,17 @@ impl TunnelClient {
             }
         }
         let _readiness_guard = ReadinessGuard(self.health.clone());
+        let startup_clock = Instant::now();
         tokio::pin!(stop);
         let mut receipts = HashSet::new();
         let mut queue = VecDeque::new();
         let mut work = FuturesUnordered::new();
         let mut next_poll = Instant::now();
+        // A full 15s empty long poll must not delay first-time readiness.
+        // Preserve normal long polling after the first successful response.
+        let mut startup = true;
+        let mut startup_attempts = 0u64;
+        let mut startup_request_time = Duration::ZERO;
         let mut failures = 0u32;
         // Keep a poll future alive while workers complete: dropping it on each
         // completion could lose commands already removed from the server queue.
@@ -46,7 +52,8 @@ impl TunnelClient {
                 let hint = self.limits.concurrency.saturating_sub(work.len()).max(1);
                 let poll = async move {
                     sleep_until(next_poll).await;
-                    self.poll(hint).await
+                    let started = Instant::now();
+                    (self.poll(hint, startup).await, started.elapsed())
                 };
                 // Snapshot size above instead of borrowing work throughout poll.
                 tokio::pin!(poll);
@@ -54,10 +61,17 @@ impl TunnelClient {
                     tokio::select! {
                         biased;
                         _ = &mut stop => break 'run Ok(()),
-                        result = &mut poll => {
+                        (result, request_time) = &mut poll => {
+                            if startup {
+                                startup_attempts = startup_attempts.saturating_add(1);
+                                startup_request_time = startup_request_time.saturating_add(request_time);
+                            }
                             match result {
                                 Ok((received, commands)) => {
-                                    self.health.ready(true); failures = 0; next_poll = Instant::now();
+                                    if startup {
+                                        self.health.record_initial_poll(startup_clock.elapsed(), startup_attempts, startup_request_time);
+                                    }
+                                    self.health.ready(true); startup = false; failures = 0; next_poll = Instant::now();
                                     // Validate the batch's correlation keys before admitting any item.
                                     if commands.iter().any(|c| c.request_id.is_empty() || c.request_id.len() > 256) { break 'run Err(Error::Protocol); }
                                     for command in commands {
